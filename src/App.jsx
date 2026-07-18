@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { syncService } from './SyncService';
 
 function App() {
@@ -8,19 +8,15 @@ function App() {
   const [error, setError] = useState('');
   const [name, setName] = useState('');
   const [roomCode, setRoomCode] = useState('');
-  
-  // Progress bar specific state
   const [progress, setProgress] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
-    // Listen to changes from our Service
     syncService.onUpdate = (data) => {
       setSyncData(prev => ({ ...prev, ...data }));
       if (data.roomState) setRoomState(data.roomState);
     };
 
-    // 60fps Loop for the progress bar
     const interval = setInterval(() => {
       if (!isDragging && syncService.playbackState.duration > 0) {
         setProgress((syncService.getCurrentTime() / syncService.playbackState.duration) * 100);
@@ -38,14 +34,14 @@ function App() {
   };
 
   const handleCreate = async () => {
-    if (!name) return showError('Please enter your name');
+    if (!name.trim()) return showError('Please enter your name');
     const res = await syncService.createRoom(name);
     if (res.success) setScreen('room');
     else showError('Failed to create room');
   };
 
   const handleJoin = async () => {
-    if (!name || roomCode.length !== 4) return showError('Enter name and 4-letter code');
+    if (!name.trim() || roomCode.length !== 4) return showError('Enter name and 4-letter code');
     const res = await syncService.joinRoom(roomCode, name);
     if (res.success) setScreen('room');
     else showError(res.error || 'Room not found');
@@ -53,30 +49,62 @@ function App() {
 
   const showError = (msg) => {
     setError(msg);
-    setTimeout(() => setError(''), 3000);
+    setTimeout(() => setError(''), 3500);
   };
 
   const copyRoomCode = () => {
     navigator.clipboard.writeText(syncData.state?.roomId);
-    alert('Copied!');
+    showError('✅ Room code copied!');
   };
 
-  // --- RENDER LANDING ---
   if (screen === 'landing') {
     return (
       <div className="screen">
         <div className="container">
-          <div style={{ textAlign: 'center' }}>
+          <div className="landing-hero">
             <div className="logo">🎵</div>
             <h1>SyncPlay</h1>
-            <p className="subtitle">Precision Audio Sync (~1ms accuracy)</p>
+            <p className="subtitle">Precision Audio Sync • Real-Time Synchronization</p>
           </div>
+
           <div className="card">
-            <input type="text" placeholder="Your name" value={name} onChange={e => setName(e.target.value)} />
-            <button className="btn btn-primary" onClick={handleCreate}>Create Room</button>
-            <div className="divider"><span>or join existing</span></div>
-            <input type="text" className="room-code-input" placeholder="ABCD" maxLength={4} value={roomCode} onChange={e => setRoomCode(e.target.value)} />
-            <button className="btn btn-secondary" onClick={handleJoin}>Join Room</button>
+            <div className="form-group">
+              <label className="form-label">👤 Your Name</label>
+              <input 
+                type="text" 
+                placeholder="Enter your name" 
+                value={name} 
+                onChange={e => setName(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleCreate()}
+              />
+            </div>
+
+            <button className="btn btn-primary" onClick={handleCreate}>
+              🎤 Create Room
+            </button>
+
+            <div className="divider"><span>or join existing room</span></div>
+
+            <div className="form-group">
+              <label className="form-label">🚪 Room Code</label>
+              <input 
+                type="text" 
+                className="room-code-input" 
+                placeholder="XXXX" 
+                maxLength={4} 
+                value={roomCode}
+                onChange={e => setRoomCode(e.target.value.toUpperCase())}
+                onKeyPress={(e) => e.key === 'Enter' && handleJoin()}
+              />
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '6px', textAlign: 'center' }}>
+                4-character code from host
+              </p>
+            </div>
+
+            <button className="btn btn-secondary" onClick={handleJoin}>
+              🚪 Join Room
+            </button>
+
             {error && <p className="error">{error}</p>}
           </div>
         </div>
@@ -84,7 +112,6 @@ function App() {
     );
   }
 
-  // --- RENDER ROOM ---
   const s = syncData.state || {};
   const ps = syncData.playbackState || {};
   const cs = syncData.clockSync || {};
@@ -96,53 +123,69 @@ function App() {
       <div className="container container-room">
         {/* Header */}
         <div className="room-header">
-          <div>
-            <h2 style={{ fontSize: '1.2rem', marginBottom: '4px' }}>🎵 SyncPlay Room</h2>
-            <span className="room-code" onClick={copyRoomCode}>{s.roomId || '----'}</span>
+          <div className="header-left">
+            <h2>🎵 SyncPlay</h2>
+            <div className="room-code" onClick={copyRoomCode} title="Click to copy room code">
+              {s.roomId || '----'}
+            </div>
           </div>
           <span className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}>
-            {cs.rtt < 30 ? '✅ Excellent' : cs.rtt < 80 ? '✅ Good' : '⏳ Syncing...'}
+            {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '⏳ Syncing...'}
           </span>
         </div>
 
-        {/* Members */}
+        {/* Members Section */}
         <div className="section">
-          <div className="section-title">👥 Members ({members.length})</div>
+          <div className="section-title">👥 Room Members ({members.length})</div>
           <div className="members-list">
             {members.map(m => (
               <div key={m.id} className={`member-chip ${m.isHost ? 'host' : ''}`}>
-                {m.isHost ? '👑 ' : ''}{m.name} {m.id === s.myId ? '(You)' : ''}
+                {m.isHost ? '👑 ' : '👤 '}{m.name} {m.id === s.myId ? '(You)' : ''}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Host Upload */}
+        {/* Host Upload Section */}
         {s.isHost && (
           <div className="section">
             <div className="section-title">🎧 Host Controls</div>
-            <input type="file" id="input-file" className="file-input" accept="audio/*" onChange={(e) => syncService.uploadFile(e.target.files[0])} />
-            <label htmlFor="input-file" className="upload-btn">📁 Choose Audio File</label>
+            <input 
+              type="file" 
+              id="input-file" 
+              className="file-input" 
+              accept="audio/*" 
+              onChange={(e) => syncService.uploadFile(e.target.files[0])}
+            />
+            <label htmlFor="input-file" className="upload-btn">
+              📁 Choose Audio File
+            </label>
             {syncData.statusText && <div className="file-name">{syncData.statusText}</div>}
           </div>
         )}
 
-        {/* Player */}
+        {/* Player Section */}
         <div className="section">
           {!s.currentTrack ? (
             <div className="no-track">
               <div className="icon">🎵</div>
               <p>No track loaded</p>
-              <p style={{ fontSize: '0.8rem', marginTop: '4px' }}>{s.isHost ? 'Upload a song to get started' : 'Waiting for host...'}</p>
+              <p style={{ fontSize: '0.9rem' }}>
+                {s.isHost ? '📤 Upload a song to get started' : '⏳ Waiting for host...'}
+              </p>
             </div>
           ) : (
             <div>
-              <div className="track-name">🎵 <span>{s.currentTrack.name}</span></div>
+              <div className="track-name">
+                🎵 {s.currentTrack.name}
+              </div>
               
               <input 
                 type="range" 
                 className="progress-slider" 
-                min="0" max="100" step="0.01" 
+                min="0" 
+                max="100" 
+                step="0.01" 
                 value={progress}
                 onMouseDown={() => setIsDragging(true)}
                 onChange={(e) => setProgress(e.target.value)}
@@ -158,7 +201,11 @@ function App() {
               </div>
               
               <div className="player-controls">
-                <button className={`btn-play ${ps.isPlaying ? 'pause' : ''}`} disabled={!s.isHost || !syncData.audioReady} onClick={() => syncService.togglePlay()}>
+                <button 
+                  className={`btn-play ${ps.isPlaying ? 'pause' : ''}`} 
+                  disabled={!s.isHost || !syncData.audioReady} 
+                  onClick={() => syncService.togglePlay()}
+                >
                   <span>{ps.isPlaying ? '⏸' : '▶'}</span>
                   <span>{ps.isPlaying ? 'Pause' : 'Play'}</span>
                 </button>
@@ -166,21 +213,45 @@ function App() {
 
               <div className="volume-control">
                 <span>🔊</span>
-                <input type="range" className="vol-slider" min="0" max="100" defaultValue="80" onChange={(e) => syncService.setVolume(e.target.value)} />
+                <input 
+                  type="range" 
+                  className="vol-slider" 
+                  min="0" 
+                  max="100" 
+                  defaultValue="80" 
+                  onChange={(e) => syncService.setVolume(e.target.value)}
+                />
               </div>
 
               {ps.isPlaying && (
                 <div className="precision-indicator">
                   <div className="precision-dot"></div>
-                  <span>Web Audio API - Precision Mode Active</span>
+                  <span>🎯 Precision Mode Active</span>
                 </div>
               )}
 
               <div className="sync-stats">
-                <div className="stat"><div>Offset</div><div className="stat-value">{cs.offset}ms</div></div>
-                <div className="stat"><div>RTT</div><div className={`stat-value ${cs.rtt < 30 ? 'good' : cs.rtt < 80 ? 'warning' : 'bad'}`}>{cs.rtt}ms</div></div>
-                <div className="stat"><div>Drift</div><div className="stat-value">{ds.current}ms</div></div>
-                <div className="stat"><div>Adjustments</div><div className="stat-value">{ds.corrections}</div></div>
+                <div className="stat">
+                  <div className="stat-label">Offset</div>
+                  <div className="stat-value">{cs.offset}</div>
+                  <div className="stat-unit">ms</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-label">RTT</div>
+                  <div className={`stat-value ${cs.rtt < 30 ? 'good' : cs.rtt < 80 ? 'warning' : 'bad'}`}>
+                    {cs.rtt}
+                  </div>
+                  <div className="stat-unit">ms</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-label">Drift</div>
+                  <div className="stat-value">{ds.current}</div>
+                  <div className="stat-unit">ms</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-label">Adjustments</div>
+                  <div className="stat-value">{ds.corrections}</div>
+                </div>
               </div>
             </div>
           )}
@@ -189,7 +260,9 @@ function App() {
         {/* Peer Controls */}
         {!s.isHost && (
           <div className="section">
-            <button className="btn-host" onClick={() => syncService.becomeHost()}>🎤 Become Host</button>
+            <button className="btn-host" onClick={() => syncService.becomeHost()}>
+              🎤 Become Host
+            </button>
           </div>
         )}
       </div>

@@ -2,8 +2,8 @@ import { io } from 'socket.io-client';
 
 class SyncService {
   constructor() {
-    // Note: Update this to your server's URL if hosting elsewhere
-    this.socket = io('http://localhost:5000', { transports: ['websocket'], upgrade: false });
+    this.serverBaseUrl = this.getServerBaseUrl();
+    this.socket = io(this.serverBaseUrl, { transports: ['websocket'], upgrade: false });
     
     this.audioContext = null;
     this.audioBuffer = null;
@@ -20,6 +20,22 @@ class SyncService {
     this.onUpdate = null;
 
     this.setupSocket();
+  }
+
+  getServerBaseUrl() {
+    const envUrl = import.meta.env.VITE_SOCKET_URL;
+    if (envUrl) return envUrl;
+
+    const protocol = window.location.protocol || 'http:';
+    const hostname = import.meta.env.VITE_SOCKET_HOST || window.location.hostname;
+    const port = import.meta.env.VITE_SOCKET_PORT || 5000;
+    return `${protocol}//${hostname}:${port}`;
+  }
+
+  getTrackUrl(path) {
+    if (!path) return path;
+    if (/^https?:\/\//i.test(path)) return path;
+    return `${this.serverBaseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
   }
 
   // --- AUDIO SETUP ---
@@ -63,7 +79,7 @@ class SyncService {
       
       try {
         this.initAudioContext();
-        this.audioBuffer = await this.loadAudioBuffer('http://localhost:5000' + data.track.url);
+        this.audioBuffer = await this.loadAudioBuffer(this.getTrackUrl(data.track.url));
         this.playbackState.duration = this.audioBuffer.duration;
         this.playbackState.startOffset = 0;
         
@@ -128,7 +144,7 @@ class SyncService {
             this.notifyUpdate({ loading: true, statusText: '⏳ Loading audio buffer...' });
             try {
               this.initAudioContext();
-              this.audioBuffer = await this.loadAudioBuffer('http://localhost:5000' + res.room.currentTrack.url);
+              this.audioBuffer = await this.loadAudioBuffer(this.getTrackUrl(res.room.currentTrack.url));
               this.playbackState.duration = this.audioBuffer.duration;
               this.notifyUpdate({ loading: false, audioReady: true, statusText: '✅ Audio ready' });
               this.socket.emit('audio-ready');
@@ -171,7 +187,7 @@ class SyncService {
     formData.append('audio', file);
     this.notifyUpdate({ statusText: `Uploading: ${file.name}...` });
     
-    fetch('http://localhost:5000/upload', { method: 'POST', body: formData })
+    fetch(`${this.serverBaseUrl}/upload`, { method: 'POST', body: formData })
       .then(res => res.json())
       .then(async data => {
         if (data.url) {
@@ -180,7 +196,7 @@ class SyncService {
           this.notifyUpdate({ loading: true, statusText: '⏳ Loading audio buffer...' });
           
           this.initAudioContext();
-          this.audioBuffer = await this.loadAudioBuffer('http://localhost:5000' + data.url);
+          this.audioBuffer = await this.loadAudioBuffer(this.getTrackUrl(data.url));
           this.playbackState.duration = this.audioBuffer.duration;
           this.playbackState.startOffset = 0;
           this.notifyUpdate({ loading: false, audioReady: true, statusText: '✅ Audio ready' });
