@@ -71,6 +71,7 @@ function getRoomState(room) {
     currentTrack: room.currentTrack,
     playbackState: room.playbackState,
     placements: room.placements || {},
+    audioSettings: room.audioSettings || { effectPreset: 'none', spatialMode: 'normal' },
     maxRTT: Math.min(maxRTT, 500),
     readyCount: room.readyMembers ? room.readyMembers.size : 0,
     totalCount: room.members.size
@@ -117,6 +118,8 @@ io.on('connection', function(socket) {
       currentTrack: null,
       playbackState: { playing: false, position: 0, serverTimeAtPlay: 0, sequence: 0 },
       placements: {},
+      audioSettings: { effectPreset: 'none', spatialMode: 'normal' },
+      hostTransferRequests: new Set(),
       readyMembers: new Set(),
       syncSequence: 0
     };
@@ -280,6 +283,25 @@ io.on('connection', function(socket) {
     console.log('Updated placements in ' + currentRoom);
   });
 
+  socket.on('update-audio-settings', function(data) {
+    if (!currentRoom) return;
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return;
+
+    var validEffects = ['none', 'echo', 'bassBoost', 'trebleBoost'];
+    var validSpatialModes = ['normal', '8d', '16d', 'atmos'];
+    var effectPreset = validEffects.indexOf(data.effectPreset) !== -1
+      ? data.effectPreset
+      : room.audioSettings.effectPreset;
+    var spatialMode = validSpatialModes.indexOf(data.spatialMode) !== -1
+      ? data.spatialMode
+      : room.audioSettings.spatialMode;
+
+    room.audioSettings = { effectPreset: effectPreset, spatialMode: spatialMode };
+    io.to(currentRoom).emit('audio-settings-updated', room.audioSettings);
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+  });
+
   socket.on('sync-heartbeat', function(data) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
@@ -306,16 +328,36 @@ io.on('connection', function(socket) {
     }
   });
 
-  socket.on('become-host', function(callback) {
-    if (!currentRoom) return callback({ success: false });
+  socket.on('request-host-transfer', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
     var room = rooms.get(currentRoom);
-    if (!room) return callback({ success: false });
+    if (!room) return callback({ success: false, error: 'Room not found' });
+    if (room.hostId === socket.id) return callback({ success: false, error: 'You are already the host' });
+    if (room.hostTransferRequests.has(socket.id)) return callback({ success: true, pending: true });
+
+    room.hostTransferRequests.add(socket.id);
+    var requester = room.members.get(socket.id);
+    io.to(room.hostId).emit('host-transfer-request', {
+      requesterId: socket.id,
+      requesterName: requester ? requester.name : 'A room member'
+    });
+    callback({ success: true, pending: true });
+  });
+
+  socket.on('approve-host-transfer', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    var requesterId = data && data.requesterId;
+    if (!room || room.hostId !== socket.id || !room.hostTransferRequests.has(requesterId)) {
+      return callback({ success: false, error: 'This request is no longer available' });
+    }
 
     var oldHost = room.members.get(room.hostId);
     if (oldHost) oldHost.isHost = false;
 
-    room.hostId = socket.id;
-    var newHost = room.members.get(socket.id);
+    room.hostId = requesterId;
+    room.hostTransferRequests.clear();
+    var newHost = room.members.get(requesterId);
     if (newHost) newHost.isHost = true;
 
     room.playbackState.playing = false;
@@ -328,6 +370,7 @@ io.on('connection', function(socket) {
       sequence: room.syncSequence,
       serverTime: serverTime()
     });
+    io.to(currentRoom).emit('host-transfer-resolved', { requesterId: requesterId });
     callback({ success: true });
     console.log('New host in ' + currentRoom + ': ' + (newHost ? newHost.name : 'unknown'));
   });
@@ -342,6 +385,7 @@ io.on('connection', function(socket) {
 
     var member = room.members.get(socket.id);
     room.members.delete(socket.id);
+    room.hostTransferRequests.delete(socket.id);
     if (room.readyMembers) {
       room.readyMembers.delete(socket.id);
     }

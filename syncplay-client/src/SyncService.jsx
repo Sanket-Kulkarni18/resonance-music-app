@@ -27,6 +27,7 @@ class SyncService {
     this.clockSync = { offset: 0, rtt: 50, synced: false, audioContextBaseTime: 0 };
     this.driftStats = { current: 0, corrections: 0 };
     this.state = { myId: null, myName: '', roomId: null, isHost: false, currentTrack: null };
+    this.audioSettings = { effectPreset: 'none', spatialMode: 'normal' };
 
     this.onUpdate = null;
     this.setupSocket();
@@ -119,7 +120,13 @@ class SyncService {
       this.state.isHost = roomState.hostId === this.state.myId;
       if (roomState.currentTrack) this.state.currentTrack = roomState.currentTrack;
       if (roomState.placements) this.devicePlacements = roomState.placements;
-      this.notifyUpdate({ roomState });
+      if (roomState.audioSettings) this.audioSettings = roomState.audioSettings;
+      this.notifyUpdate({ roomState, audioSettings: this.audioSettings });
+    });
+
+    this.socket.on('audio-settings-updated', (audioSettings) => {
+      this.audioSettings = audioSettings;
+      this.notifyUpdate({ audioSettings: this.audioSettings });
     });
 
     this.socket.on('track-loaded', async (data) => {
@@ -160,6 +167,14 @@ class SyncService {
 
     this.socket.on('sync-correction', (data) => this.correctDrift(data.position, data.serverTime));
 
+    this.socket.on('host-transfer-request', (request) => {
+      this.notifyUpdate({ hostTransferRequest: request });
+    });
+
+    this.socket.on('host-transfer-resolved', () => {
+      this.notifyUpdate({ hostTransferRequest: null, hostRequestPending: false });
+    });
+
     setInterval(() => {
       if (this.state.isHost && this.playbackState.isPlaying && this.socket) {
         this.socket.emit('sync-heartbeat', { position: this.getCurrentTime(), serverTime: this.getServerTime() });
@@ -173,7 +188,13 @@ class SyncService {
       this.resumeAudioContext();
       this.state.myName = name;
       this.socket.emit('create-room', { name }, (res) => {
-        if (res.success) this.state.roomId = res.room.id;
+        if (res.success) {
+          this.state.roomId = res.room.id;
+          this.state.isHost = true;
+          this.audioSettings = res.room.audioSettings || this.audioSettings;
+          this.devicePlacements = res.room.placements || {};
+          this.notifyUpdate({ roomState: res.room, audioSettings: this.audioSettings });
+        }
         resolve(res);
       });
     });
@@ -226,8 +247,22 @@ class SyncService {
     this.socket.emit('seek', { position, serverTime });
   }
 
-  becomeHost() {
-    this.socket.emit('become-host', () => {});
+  requestHostTransfer() {
+    return new Promise((resolve) => {
+      this.socket.emit('request-host-transfer', (response) => {
+        if (response.success) this.notifyUpdate({ hostRequestPending: Boolean(response.pending) });
+        resolve(response);
+      });
+    });
+  }
+
+  approveHostTransfer(requesterId) {
+    return new Promise((resolve) => {
+      this.socket.emit('approve-host-transfer', { requesterId }, (response) => {
+        if (response.success) this.notifyUpdate({ hostTransferRequest: null });
+        resolve(response);
+      });
+    });
   }
 
   uploadFile(file) {
@@ -280,6 +315,11 @@ class SyncService {
   syncDevicePlacements(placements) {
     if (!this.state.isHost || !this.socket) return;
     this.socket.emit('update-placements', { placements });
+  }
+
+  updateAudioSettings(audioSettings) {
+    if (!this.state.isHost || !this.socket) return;
+    this.socket.emit('update-audio-settings', audioSettings);
   }
 
   createReverbBuffer() {

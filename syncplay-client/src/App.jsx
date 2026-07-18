@@ -30,13 +30,21 @@ function App() {
   const [draggingId, setDraggingId] = useState(null);
   const mapRef = useRef(null);
   const lastSyncedPlacementsRef = useRef('');
+  const draggingIdRef = useRef(null);
+
+  useEffect(() => {
+    draggingIdRef.current = draggingId;
+  }, [draggingId]);
 
   useEffect(() => {
     syncService.onUpdate = (data) => {
       setSyncData(prev => ({ ...prev, ...data }));
       if (data.roomState) {
         setRoomState(data.roomState);
-        if (data.roomState.placements) setDevicePlacements(data.roomState.placements);
+        // Do not replace the local position with delayed server updates mid-drag.
+        if (data.roomState.placements && !draggingIdRef.current) {
+          setDevicePlacements(data.roomState.placements);
+        }
       }
     };
 
@@ -73,17 +81,23 @@ function App() {
   }, [spatialMode]);
 
   useEffect(() => {
+    if (!syncData.audioSettings) return;
+    setSelectedEffect(syncData.audioSettings.effectPreset || 'none');
+    setSpatialMode(syncData.audioSettings.spatialMode || 'normal');
+  }, [syncData.audioSettings]);
+
+  useEffect(() => {
     syncService.setDevicePlacements(devicePlacements);
   }, [devicePlacements]);
 
   useEffect(() => {
-    if (!syncData.state?.isHost || isDragging) return;
+    if (!syncData.state?.isHost || draggingId) return;
     if (Object.keys(devicePlacements).length === 0) return;
     const placementsString = JSON.stringify(devicePlacements);
     if (placementsString === lastSyncedPlacementsRef.current) return;
     syncService.syncDevicePlacements(devicePlacements);
     lastSyncedPlacementsRef.current = placementsString;
-  }, [devicePlacements, isDragging, syncData.state?.isHost]);
+  }, [devicePlacements, draggingId, syncData.state?.isHost]);
 
   useEffect(() => {
     if (!draggingId) return;
@@ -145,6 +159,7 @@ function App() {
   const handleDragStart = (memberId, event) => {
     if (!syncData.state?.isHost) return;
     event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     setDraggingId(memberId);
   };
 
@@ -152,6 +167,28 @@ function App() {
     left: `${50 + placement.x * 38}%`,
     top: `${50 + placement.y * 38}%`
   });
+
+  const handleEffectChange = (effectPreset) => {
+    if (!syncData.state?.isHost) return;
+    setSelectedEffect(effectPreset);
+    syncService.updateAudioSettings({ effectPreset, spatialMode });
+  };
+
+  const handleSpatialModeChange = (nextSpatialMode) => {
+    if (!syncData.state?.isHost) return;
+    setSpatialMode(nextSpatialMode);
+    syncService.updateAudioSettings({ effectPreset: selectedEffect, spatialMode: nextSpatialMode });
+  };
+
+  const handleHostRequest = async () => {
+    const result = await syncService.requestHostTransfer();
+    if (!result.success) showError(result.error || 'Unable to request host controls');
+  };
+
+  const approveHostTransfer = async () => {
+    const result = await syncService.approveHostTransfer(syncData.hostTransferRequest.requesterId);
+    if (!result.success) showError(result.error || 'Unable to transfer host controls');
+  };
 
   if (screen === 'landing') {
     return (
@@ -266,7 +303,8 @@ function App() {
                 key={option.id}
                 type="button"
                 className={`effect-chip ${selectedEffect === option.id ? 'active' : ''}`}
-                onClick={() => setSelectedEffect(option.id)}
+                disabled={!s.isHost}
+                onClick={() => handleEffectChange(option.id)}
               >
                 {option.label}
               </button>
@@ -279,7 +317,8 @@ function App() {
                 key={mode.id}
                 type="button"
                 className={`effect-chip ${spatialMode === mode.id ? 'active' : ''}`}
-                onClick={() => setSpatialMode(mode.id)}
+                disabled={!s.isHost}
+                onClick={() => handleSpatialModeChange(mode.id)}
               >
                 {mode.label}
               </button>
@@ -288,6 +327,7 @@ function App() {
 
           <p className="section-note">
             Drag devices around the host to shape the 8D/16D sound field. Dolby Atmos adds overhead depth and soft ambient reverb.
+            {!s.isHost && ' The host controls this mix.'}
           </p>
 
           <div className="device-map" ref={mapRef}>
