@@ -149,8 +149,8 @@ function App() {
   };
 
   const getMapPositionStyle = (placement) => ({
-    left: `calc(50% + ${placement.x * 40}px)`,
-    top: `calc(50% + ${placement.y * 40}px)`
+    left: `${50 + placement.x * 38}%`,
+    top: `${50 + placement.y * 38}%`
   });
 
   if (screen === 'landing') {
