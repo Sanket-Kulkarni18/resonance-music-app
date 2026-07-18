@@ -70,6 +70,7 @@ function getRoomState(room) {
     members: Array.from(room.members.values()),
     currentTrack: room.currentTrack,
     playbackState: room.playbackState,
+    placements: room.placements || {},
     maxRTT: Math.min(maxRTT, 500),
     readyCount: room.readyMembers ? room.readyMembers.size : 0,
     totalCount: room.members.size
@@ -115,6 +116,7 @@ io.on('connection', function(socket) {
       members: new Map(),
       currentTrack: null,
       playbackState: { playing: false, position: 0, serverTimeAtPlay: 0, sequence: 0 },
+      placements: {},
       readyMembers: new Set(),
       syncSequence: 0
     };
@@ -239,10 +241,10 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
-
+ 
     var position = data.position;
     var wasPlaying = room.playbackState.playing;
-    
+     
     var maxRTT = 50;
     room.members.forEach(function(member) {
       var rtt = clientRTT.get(member.id) || 50;
@@ -250,7 +252,7 @@ io.on('connection', function(socket) {
     });
     var syncBuffer = Math.max(100, maxRTT + 50);
     var scheduledTime = wasPlaying ? serverTime() + syncBuffer : 0;
-
+ 
     room.syncSequence++;
     room.playbackState = {
       playing: wasPlaying,
@@ -258,7 +260,7 @@ io.on('connection', function(socket) {
       serverTimeAtPlay: scheduledTime,
       sequence: room.syncSequence
     };
-
+ 
     io.to(currentRoom).emit('sync-seek', {
       position: position,
       serverTimeAtPlay: scheduledTime,
@@ -266,6 +268,16 @@ io.on('connection', function(socket) {
       sequence: room.syncSequence
     });
     console.log('Seek in ' + currentRoom + ' to ' + safeFixed(position) + 's');
+  });
+
+  socket.on('update-placements', function(data) {
+    if (!currentRoom) return;
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return;
+ 
+    room.placements = data.placements || {};
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Updated placements in ' + currentRoom);
   });
 
   socket.on('sync-heartbeat', function(data) {

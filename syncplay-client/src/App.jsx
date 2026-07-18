@@ -1,5 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { syncService } from './SyncService';
+
+const effectOptions = [
+  { id: 'none', label: 'No Effect' },
+  { id: 'echo', label: 'Echo' },
+  { id: 'bassBoost', label: 'Bass Boost' },
+  { id: 'trebleBoost', label: 'Treble Boost' }
+];
+
+const spatialModes = [
+  { id: 'normal', label: 'Normal' },
+  { id: '8d', label: '8D' },
+  { id: '16d', label: '16D' },
+  { id: 'atmos', label: 'Dolby Atmos' }
+];
 
 function App() {
   const [screen, setScreen] = useState('landing');
@@ -10,11 +24,20 @@ function App() {
   const [roomCode, setRoomCode] = useState('');
   const [progress, setProgress] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [selectedEffect, setSelectedEffect] = useState('none');
+  const [spatialMode, setSpatialMode] = useState('normal');
+  const [devicePlacements, setDevicePlacements] = useState({});
+  const [draggingId, setDraggingId] = useState(null);
+  const mapRef = useRef(null);
+  const lastSyncedPlacementsRef = useRef('');
 
   useEffect(() => {
     syncService.onUpdate = (data) => {
       setSyncData(prev => ({ ...prev, ...data }));
-      if (data.roomState) setRoomState(data.roomState);
+      if (data.roomState) {
+        setRoomState(data.roomState);
+        if (data.roomState.placements) setDevicePlacements(data.roomState.placements);
+      }
     };
 
     const interval = setInterval(() => {
@@ -25,6 +48,68 @@ function App() {
 
     return () => clearInterval(interval);
   }, [isDragging]);
+
+  useEffect(() => {
+    if (!roomState) return;
+    setDevicePlacements(prev => {
+      const updated = { ...prev };
+      roomState.members.forEach((member, index) => {
+        if (!updated[member.id]) {
+          const angle = (360 / Math.max(1, roomState.members.length)) * index;
+          const rad = angle * Math.PI / 180;
+          updated[member.id] = { x: Math.cos(rad) * 0.55, y: Math.sin(rad) * 0.55 };
+        }
+      });
+      return updated;
+    });
+  }, [roomState?.members?.length]);
+
+  useEffect(() => {
+    syncService.setEffectPreset(selectedEffect);
+  }, [selectedEffect]);
+
+  useEffect(() => {
+    syncService.setSpatialMode(spatialMode);
+  }, [spatialMode]);
+
+  useEffect(() => {
+    syncService.setDevicePlacements(devicePlacements);
+  }, [devicePlacements]);
+
+  useEffect(() => {
+    if (!syncData.state?.isHost || isDragging) return;
+    if (Object.keys(devicePlacements).length === 0) return;
+    const placementsString = JSON.stringify(devicePlacements);
+    if (placementsString === lastSyncedPlacementsRef.current) return;
+    syncService.syncDevicePlacements(devicePlacements);
+    lastSyncedPlacementsRef.current = placementsString;
+  }, [devicePlacements, isDragging, syncData.state?.isHost]);
+
+  useEffect(() => {
+    if (!draggingId) return;
+
+    const handleMove = (event) => {
+      if (!mapRef.current) return;
+      const rect = mapRef.current.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
+      const y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
+      const clamp = (value) => Math.max(-0.9, Math.min(0.9, value));
+      setDevicePlacements(prev => ({
+        ...prev,
+        [draggingId]: { x: clamp(x), y: clamp(y) }
+      }));
+    };
+
+    const handleUp = () => setDraggingId(null);
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+  }, [draggingId]);
 
   const formatTime = (seconds) => {
     if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
@@ -56,6 +141,17 @@ function App() {
     navigator.clipboard.writeText(syncData.state?.roomId);
     showError('✅ Room code copied!');
   };
+
+  const handleDragStart = (memberId, event) => {
+    if (!syncData.state?.isHost) return;
+    event.preventDefault();
+    setDraggingId(memberId);
+  };
+
+  const getMapPositionStyle = (placement) => ({
+    left: `calc(50% + ${placement.x * 40}px)`,
+    top: `calc(50% + ${placement.y * 40}px)`
+  });
 
   if (screen === 'landing') {
     return (
@@ -121,7 +217,6 @@ function App() {
   return (
     <div className="screen screen-room">
       <div className="container container-room">
-        {/* Header */}
         <div className="room-header">
           <div className="header-left">
             <h2>🎵 SyncPlay</h2>
@@ -134,7 +229,6 @@ function App() {
           </span>
         </div>
 
-        {/* Members Section */}
         <div className="section">
           <div className="section-title">👥 Room Members ({members.length})</div>
           <div className="members-list">
@@ -146,7 +240,6 @@ function App() {
           </div>
         </div>
 
-        {/* Host Upload Section */}
         {s.isHost && (
           <div className="section">
             <div className="section-title">🎧 Host Controls</div>
@@ -164,7 +257,59 @@ function App() {
           </div>
         )}
 
-        {/* Player Section */}
+        <div className="section">
+          <div className="section-title">🎛 DJ & Spatial Effects</div>
+
+        <div className="effect-row">
+            {effectOptions.map(option => (
+              <button
+                key={option.id}
+                type="button"
+                className={`effect-chip ${selectedEffect === option.id ? 'active' : ''}`}
+                onClick={() => setSelectedEffect(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="spatial-row">
+            {spatialModes.map(mode => (
+              <button
+                key={mode.id}
+                type="button"
+                className={`effect-chip ${spatialMode === mode.id ? 'active' : ''}`}
+                onClick={() => setSpatialMode(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="section-note">
+            Drag devices around the host to shape the 8D/16D sound field. Dolby Atmos adds overhead depth and soft ambient reverb.
+          </p>
+
+          <div className="device-map" ref={mapRef}>
+            <div className="host-node">Host</div>
+            {members.map(member => {
+              const placement = devicePlacements[member.id] || { x: 0, y: -0.6 };
+              return (
+                <div
+                  role="button"
+                  key={member.id}
+                  className={`device-node ${draggingId === member.id ? 'dragging' : ''}`}
+                  style={getMapPositionStyle(placement)}
+                  onPointerDown={(e) => handleDragStart(member.id, e)}
+                  title={member.isHost ? 'Host position' : `Drag to reposition ${member.name}`}
+                >
+                  {member.isHost ? '👑 Host' : member.name}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="section">
           {!s.currentTrack ? (
             <div className="no-track">
@@ -179,7 +324,7 @@ function App() {
               <div className="track-name">
                 🎵 {s.currentTrack.name}
               </div>
-              
+
               <input 
                 type="range" 
                 className="progress-slider" 
@@ -194,12 +339,12 @@ function App() {
                   syncService.seek((e.target.value / 100) * ps.duration);
                 }}
               />
-              
+
               <div className="time-display">
                 <span>{formatTime(isDragging ? (progress/100) * ps.duration : syncService.getCurrentTime())}</span>
                 <span>{formatTime(ps.duration)}</span>
               </div>
-              
+
               <div className="player-controls">
                 <button 
                   className={`btn-play ${ps.isPlaying ? 'pause' : ''}`} 
@@ -257,7 +402,6 @@ function App() {
           )}
         </div>
 
-        {/* Peer Controls */}
         {!s.isHost && (
           <div className="section">
             <button className="btn-host" onClick={() => syncService.becomeHost()}>
