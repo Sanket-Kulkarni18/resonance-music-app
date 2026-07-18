@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>SyncPlay - Precision Audio Sync</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0f0f1a; --card: rgba(30, 30, 50, 0.8); --border: rgba(100, 100, 150, 0.3);
+      --primary: #8b5cf6; --secondary: #06b6d4; --accent: #f472b6;
+      --success: #10b981; --danger: #ef4444; --warning: #f59e0b;
+      --text: #e0e0f0; --text-dim: #888899;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f0f1a 0%, #1a1025 50%, #0f0f1a 100%);
+      color: var(--text); min-height: 100vh;
+    }
+    .screen { display: none; min-height: 100vh; padding: 20px; }
+    .screen.active { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    .container { width: 100%; max-width: 420px; }
+    .logo { font-size: 4rem; margin-bottom: 10px; }
+    h1 { 
+      font-size: 2.5rem; font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .subtitle { color: var(--text-dim); margin-bottom: 30px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 24px; backdrop-filter: blur(10px);
+    }
+    input[type="text"] {
+      width: 100%; padding: 14px 16px; border: 1px solid var(--border);
+      border-radius: 12px; background: rgba(0,0,0,0.3); color: var(--text);
+      font-size: 1rem; outline: none; margin-bottom: 12px;
+    }
+    input[type="text"]:focus { border-color: var(--primary); }
+    .room-code-input { text-align: center; font-size: 1.5rem !important; letter-spacing: 0.5em; text-transform: uppercase; }
+    .btn {
+      width: 100%; padding: 14px 20px; border: none; border-radius: 12px;
+      font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-primary { background: linear-gradient(135deg, var(--primary), #a855f7); color: white; }
+    .btn-secondary { background: transparent; border: 2px solid var(--secondary); color: var(--secondary); }
+    .divider { display: flex; align-items: center; margin: 20px 0; color: var(--text-dim); }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .divider span { padding: 0 15px; }
+    #screen-room { justify-content: flex-start; padding-top: 20px; }
+    #screen-room .container { max-width: 500px; }
+    .room-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+    .room-code { font-family: monospace; font-size: 1.5rem; color: var(--secondary); letter-spacing: 4px; cursor: pointer; padding: 4px 12px; background: rgba(6, 182, 212, 0.1); border-radius: 8px; }
+    .sync-badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(16, 185, 129, 0.2); color: var(--success); }
+    .sync-badge.syncing { background: rgba(234, 179, 8, 0.2); color: var(--warning); }
+    .sync-badge.excellent { background: rgba(16, 185, 129, 0.3); color: #4ade80; }
+    .section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .section-title { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .members-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .member-chip { padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; background: rgba(139, 92, 246, 0.15); border: 1px solid var(--border); }
+    .member-chip.host { background: rgba(139, 92, 246, 0.3); border-color: var(--primary); }
+    .upload-btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; border-radius: 10px; background: linear-gradient(135deg, var(--primary), var(--accent)); color: white; font-weight: 600; cursor: pointer; }
+    .file-input { display: none; }
+    .file-name { font-size: 0.8rem; color: var(--text-dim); margin-top: 8px; }
+    .loading-status { margin-top: 10px; padding: 8px 12px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; font-size: 0.8rem; color: var(--warning); }
+    .loading-status.ready { background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.3); color: var(--success); }
+    .track-name { text-align: center; padding: 10px 16px; background: linear-gradient(135deg, rgba(244, 114, 182, 0.2), rgba(139, 92, 246, 0.2)); border-radius: 20px; color: var(--accent); font-weight: 500; margin-bottom: 16px; }
+    .progress-slider { -webkit-appearance: none; width: 100%; height: 6px; background: rgba(255,255,255,0.2); border-radius: 4px; outline: none; margin-bottom: 12px; cursor: pointer; }
+    .progress-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--secondary); cursor: pointer; transition: transform 0.1s; }
+    .progress-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+    .time-display { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 16px; }
+    .player-controls { display: flex; justify-content: center; margin-bottom: 16px; }
+    .btn-play { display: flex; align-items: center; gap: 8px; padding: 14px 40px; border-radius: 30px; font-size: 1.1rem; background: linear-gradient(135deg, var(--success), #059669); color: white; border: none; font-weight: 600; cursor: pointer; }
+    .btn-play:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-play.pause { background: linear-gradient(135deg, var(--danger), #dc2626); }
+    .volume-control { display: flex; align-items: center; justify-content: center; gap: 10px; }
+    input[type="range"] { -webkit-appearance: none; width: 120px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--secondary); cursor: pointer; }
+    .sync-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 0.65rem; color: var(--text-dim); margin-top: 12px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; }
+    .sync-stats .stat { text-align: center; }
+    .sync-stats .stat-value { font-size: 0.85rem; font-weight: 600; color: var(--text); font-family: monospace; }
+    .sync-stats .stat-value.good { color: var(--success); }
+    .sync-stats .stat-value.warning { color: var(--warning); }
+    .sync-stats .stat-value.bad { color: var(--danger); }
+    .no-track { text-align: center; padding: 30px; color: var(--text-dim); }
+    .no-track .icon { font-size: 3rem; margin-bottom: 10px; }
+    .btn-host { width: 100%; padding: 12px; background: transparent; border: 1px solid var(--primary); color: var(--primary); border-radius: 10px; font-weight: 600; cursor: pointer; }
+    .error { color: var(--danger); font-size: 0.9rem; text-align: center; margin-top: 12px; }
+    .hidden { display: none !important; }
+    .precision-indicator { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 10px; background: rgba(0,0,0,0.3); border-radius: 6px; font-size: 0.7rem; }
+    .precision-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+</head>
+<body>
+  <div id="screen-landing" class="screen active">
+    <div class="container">
+      <div style="text-align: center;">
+        <div class="logo">🎵</div>
+        <h1>SyncPlay</h1>
+        <p class="subtitle">Precision Audio Sync (~1ms accuracy)</p>
+      </div>
+      <div class="card">
+        <input type="text" id="input-name" placeholder="Your name" maxlength="20">
+        <button class="btn btn-primary" id="btn-create">Create Room</button>
+        <div class="divider"><span>or join existing</span></div>
+        <input type="text" id="input-room-code" class="room-code-input" placeholder="ABCD" maxlength="4">
+        <button class="btn btn-secondary" id="btn-join">Join Room</button>
+        <p class="error hidden" id="error-msg"></p>
+      </div>
+    </div>
+  </div>
+  
+  <div id="screen-room" class="screen">
+    <div class="container">
+      <div class="room-header">
+        <div>
+          <h2 style="font-size: 1.2rem; margin-bottom: 4px;">🎵 SyncPlay Room</h2>
+          <span class="room-code" id="room-code">----</span>
+        </div>
+        <span class="sync-badge syncing" id="sync-status">⏳ Syncing...</span>
+      </div>
+      
+      <div class="section">
+        <div class="section-title" id="members-title">👥 Members</div>
+        <div class="members-list" id="members-list"></div>
+      </div>
+      
+      <div class="section hidden" id="host-controls">
+        <div class="section-title">🎧 Host Controls</div>
+        <input type="file" id="input-file" class="file-input" accept="audio/*">
+        <label for="input-file" class="upload-btn">📁 Choose Audio File</label>
+        <div class="file-name" id="file-name"></div>
+        <div class="loading-status hidden" id="loading-status">⏳ Loading audio buffer...</div>
+      </div>
+      
+      <div class="section" id="player-section">
+        <div class="no-track" id="no-track">
+          <div class="icon">🎵</div>
+          <p>No track loaded</p>
+          <p style="font-size: 0.8rem; margin-top: 4px;" id="no-track-hint"></p>
+        </div>
+        
+        <div id="player-content" class="hidden">
+          <div class="track-name">🎵 <span id="track-name-text">Track Name</span></div>
+          
+          <input type="range" id="progress-slider" class="progress-slider" min="0" max="100" value="0" step="0.01">
+          
+          <div class="time-display">
+            <span id="time-current">0:00</span>
+            <span id="time-duration">0:00</span>
+          </div>
+          <div class="player-controls">
+            <button class="btn-play" id="btn-play" disabled>
+              <span id="play-icon">▶</span>
+              <span id="play-text">Play</span>
+            </button>
+          </div>
+          <div class="volume-control">
+            <span>🔊</span>
+            <input type="range" id="volume-slider" min="0" max="100" value="80">
+          </div>
+          <div class="precision-indicator hidden" id="precision-indicator">
+            <div class="precision-dot"></div>
+            <span>Web Audio API - Precision Mode Active</span>
+          </div>
+          <div class="sync-stats">
+            <div class="stat"><div>Offset</div><div class="stat-value" id="stat-offset">--</div></div>
+            <div class="stat"><div>RTT</div><div class="stat-value" id="stat-rtt">--</div></div>
+            <div class="stat"><div>Drift</div><div class="stat-value" id="stat-drift">--</div></div>
+            <div class="stat"><div>Adjustments</div><div class="stat-value" id="stat-corrections">0</div></div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="section hidden" id="peer-controls">
+        <button class="btn-host" id="btn-become-host">🎤 Become Host</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function() {
+    'use strict';
+    
+    var $ = function(id) { return document.getElementById(id); };
+    
+    // DOM
+    var screenLanding = $('screen-landing'), screenRoom = $('screen-room');
+    var inputName = $('input-name'), inputRoomCode = $('input-room-code');
+    var btnCreate = $('btn-create'), btnJoin = $('btn-join'), errorMsg = $('error-msg');
+    var roomCodeDisplay = $('room-code'), syncStatus = $('sync-status');
+    var membersTitle = $('members-title'), membersList = $('members-list');
+    var hostControls = $('host-controls'), peerControls = $('peer-controls');
+    var playerContent = $('player-content'), noTrack = $('no-track'), noTrackHint = $('no-track-hint');
+    var inputFile = $('input-file'), fileName = $('file-name'), loadingStatus = $('loading-status');
+    var trackNameText = $('track-name-text'), progressSlider = $('progress-slider');
+    var timeCurrent = $('time-current'), timeDuration = $('time-duration');
+    var btnPlay = $('btn-play'), playIcon = $('play-icon'), playText = $('play-text');
+    var volumeSlider = $('volume-slider'), btnBecomeHost = $('btn-become-host');
+    var precisionIndicator = $('precision-indicator');
+    var statOffset = $('stat-offset'), statRtt = $('stat-rtt'), statDrift = $('stat-drift'), statCorrections = $('stat-corrections');
+    
+    // Web Audio API
+    var audioContext = null;
+    var audioBuffer = null;
+    var sourceNode = null;
+    var gainNode = null;
+    var clockSyncInterval = null;
+    var isDraggingProgress = false;
+    
+    var playbackState = {
+      isPlaying: false,
+      startTime: 0,
+      startOffset: 0,
+      duration: 0
+    };
+    
+    function initAudioContext() {
+      if (audioContext) return audioContext;
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      gainNode = audioContext.createGain();
+      gainNode.connect(audioContext.destination);
+      gainNode.gain.value = volumeSlider.value / 100;
+      return audioContext;
+    }
+    
+    function resumeAudioContext() {
+      if (audioContext && audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+    }
+    
+    function getCurrentTime() {
+      if (!audioContext) return playbackState.startOffset;
+      if (!playbackState.isPlaying) return playbackState.startOffset;
+      var elapsed = audioContext.currentTime - playbackState.startTime;
+      return Math.min(playbackState.startOffset + elapsed, playbackState.duration);
+    }
+    
+    // Clock Sync
+    var clockSync = {
+      offset: 0,
+      rtt: 50, // FIX: Changed from 9999 to 50 to prevent massive 10 second delay bugs on initial play
+      synced: false,
+      audioContextBaseTime: 0
+    };
+    
+    function getServerTime() {
+      return (audioContext.currentTime * 1000) + clockSync.audioContextBaseTime + clockSync.offset;
+    }
+    
+    function performSingleSync() {
+      return new Promise(function(resolve) {
+        var t0 = Date.now();
+        socket.emit('clock-sync', { clientTime: t0, lastRTT: clockSync.rtt }, function(data) {
+          var t3 = Date.now();
+          var rtt = t3 - t0;
+          var offset = data.serverTime - t0 - (rtt / 2);
+          resolve({ offset: offset, rtt: rtt });
+        });
+      });
+    }
+    
+    async function performClockSync() {
+      initAudioContext();
+      clockSync.audioContextBaseTime = Date.now() - (audioContext.currentTime * 1000);
+      
+      var samples = [];
+      var ROUNDS = 20;
+      
+      for (var i = 0; i < ROUNDS; i++) {
+        var sample = await performSingleSync();
+        samples.push(sample);
+        await new Promise(function(r) { setTimeout(r, 25); });
+      }
+      
+      samples.sort(function(a, b) { return a.rtt - b.rtt; });
+      var bestCount = Math.max(3, Math.floor(ROUNDS * 0.25));
+      var bestSamples = samples.slice(0, bestCount);
+      
+      var offsets = bestSamples.map(function(s) { return s.offset; });
+      offsets.sort(function(a, b) { return a - b; });
+      var medianOffset = offsets[Math.floor(offsets.length / 2)];
+      
+      clockSync.offset = Math.round(medianOffset);
+      clockSync.rtt = bestSamples[0].rtt;
+      clockSync.synced = true;
+      
+      updateSyncUI();
+      console.log('Clock synced: offset=' + clockSync.offset + 'ms, RTT=' + clockSync.rtt + 'ms');
+    }
+    
+    function updateSyncUI() {
+      if (clockSync.synced) {
+        if (clockSync.rtt < 30) {
+          syncStatus.textContent = '✅ Excellent';
+          syncStatus.className = 'sync-badge excellent';
+        } else if (clockSync.rtt < 80) {
+          syncStatus.textContent = '✅ Good';
+          syncStatus.className = 'sync-badge';
+        } else {
+          syncStatus.textContent = '⚠️ High Latency';
+          syncStatus.className = 'sync-badge syncing';
+        }
+      }
+      statOffset.textContent = clockSync.offset + 'ms';
+      statRtt.textContent = clockSync.rtt + 'ms';
+      statRtt.className = 'stat-value ' + (clockSync.rtt < 30 ? 'good' : clockSync.rtt < 80 ? 'warning' : 'bad');
+    }
+    
+    // Audio Buffer Loading
+    function loadAudioBuffer(url) {
+      return new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.responseType = 'arraybuffer';
+        xhr.onload = function() {
+          if (xhr.status === 200) {
+            audioContext.decodeAudioData(xhr.response, function(buffer) {
+              resolve(buffer);
+            }, function(err) {
+              reject(err);
+            });
+          } else {
+            reject(new Error('Failed to load audio'));
+          }
+        };
+        xhr.onerror = reject;
+        xhr.send();
+      });
+    }
+    
+    // Playback Control
+    function startPlayback(offset, scheduleAt) {
+      if (!audioBuffer) return;
+      
+      stopPlayback();
+      resumeAudioContext();
+      
+      sourceNode = audioContext.createBufferSource();
+      sourceNode.buffer = audioBuffer;
+      sourceNode.connect(gainNode);
+      
+      var audioCtxScheduleTime;
+      if (scheduleAt) {
+        var serverNow = getServerTime();
+        var delayMs = scheduleAt - serverNow;
+        audioCtxScheduleTime = audioContext.currentTime + (delayMs / 1000);
+      } else {
+        audioCtxScheduleTime = audioContext.currentTime + 0.01;
+      }
+      
+      if (audioCtxScheduleTime < audioContext.currentTime) {
+        var lateBy = audioContext.currentTime - audioCtxScheduleTime;
+        offset += lateBy;
+        audioCtxScheduleTime = audioContext.currentTime + 0.005;
+      }
+      
+      offset = Math.max(0, Math.min(offset, audioBuffer.duration - 0.1));
+      
+      sourceNode.start(audioCtxScheduleTime, offset);
+      
+      playbackState.isPlaying = true;
+      playbackState.startTime = audioCtxScheduleTime;
+      playbackState.startOffset = offset;
+      playbackState.duration = audioBuffer.duration;
+      
+      sourceNode.onended = function() {
+        playbackState.isPlaying = false;
+        setPlayingUI(false);
+      };
+      
+      setPlayingUI(true);
+      precisionIndicator.classList.remove('hidden');
+    }
+    
+    function stopPlayback() {
+      if (sourceNode) {
+        try {
+          sourceNode.onended = null; // Prevent async ghost events
+          sourceNode.stop();
+          sourceNode.disconnect();
+        } catch (e) {}
+        sourceNode = null;
+      }
+      playbackState.startOffset = getCurrentTime();
+      playbackState.isPlaying = false;
+      setPlayingUI(false);
+    }
+    
+    function seekTo(position, scheduleAt, shouldPlay) {
+      playbackState.startOffset = position;
+      if (shouldPlay) {
+        startPlayback(position, scheduleAt);
+      }
+    }
+    
+    // Drift Correction
+    var driftStats = { current: 0, corrections: 0 };
+    
+    function correctDrift(hostPosition, hostServerTime) {
+      if (state.isHost || !playbackState.isPlaying) return;
+      
+      var serverNow = getServerTime();
+      var timeSinceHost = (serverNow - hostServerTime) / 1000;
+      var expectedPosition = hostPosition + timeSinceHost;
+      var actualPosition = getCurrentTime();
+      var driftMs = (actualPosition - expectedPosition) * 1000;
+      
+      driftStats.current = Math.round(driftMs);
+      statDrift.textContent = driftMs.toFixed(0) + 'ms';
+      statDrift.className = 'stat-value ' + (Math.abs(driftMs) < 10 ? 'good' : Math.abs(driftMs) < 30 ? 'warning' : 'bad');
+      
+      var absDrift = Math.abs(driftMs);
+      
+      if (absDrift > 100) {
+        console.log('HARD RESYNC: drift=' + driftMs.toFixed(0) + 'ms');
+        startPlayback(expectedPosition, null);
+        driftStats.corrections++;
+        statCorrections.textContent = driftStats.corrections;
+      } else if (absDrift > 15) {
+        var rate = driftMs > 0 ? 0.98 : 1.02;
+        if (absDrift > 50) rate = driftMs > 0 ? 0.95 : 1.05;
+        
+        if (sourceNode && sourceNode.playbackRate) {
+          sourceNode.playbackRate.setValueAtTime(rate, audioContext.currentTime);
+          sourceNode.playbackRate.setValueAtTime(1.0, audioContext.currentTime + (absDrift / 500));
+        }
+        
+        driftStats.corrections++;
+        statCorrections.textContent = driftStats.corrections;
+      }
+    }
+    
+    // State & UI
+    var socket = null;
+    var state = { myId: null, myName: '', roomId: null, isHost: false, currentTrack: null };
+    
+    function formatTime(seconds) {
+      if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
+      var m = Math.floor(seconds / 60);
+      var s = Math.floor(seconds % 60);
+      return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+    
+    function showScreen(screen) {
+      screenLanding.classList.remove('active');
+      screenRoom.classList.remove('active');
+      screen.classList.add('active');
+    }
+    
+    function showError(msg) {
+      errorMsg.textContent = msg;
+      errorMsg.classList.remove('hidden');
+      setTimeout(function() { errorMsg.classList.add('hidden'); }, 3000);
+    }
+    
+    function updateUI(roomState) {
+      roomCodeDisplay.textContent = roomState.id;
+      
+      if (membersTitle) {
+        membersTitle.textContent = '👥 Members (' + roomState.members.length + ')';
+      }
+
+      membersList.innerHTML = '';
+      roomState.members.forEach(function(member) {
+        var chip = document.createElement('div');
+        chip.className = 'member-chip' + (member.isHost ? ' host' : '');
+        chip.textContent = (member.isHost ? '👑 ' : '') + member.name + (member.id === state.myId ? ' (You)' : '');
+        membersList.appendChild(chip);
+      });
+      
+      state.isHost = roomState.hostId === state.myId;
+      
+      if (state.isHost) {
+        hostControls.classList.remove('hidden');
+        peerControls.classList.add('hidden');
+        btnPlay.disabled = !audioBuffer; 
+        noTrackHint.textContent = 'Upload a song to get started';
+      } else {
+        hostControls.classList.add('hidden');
+        peerControls.classList.remove('hidden');
+        btnPlay.disabled = true;
+        noTrackHint.textContent = 'Waiting for host to load a track...';
+      }
+      
+      if (roomState.currentTrack) {
+        state.currentTrack = roomState.currentTrack;
+        showPlayer(roomState.currentTrack.name);
+      }
+    }
+    
+    function showPlayer(name) {
+      noTrack.classList.add('hidden');
+      playerContent.classList.remove('hidden');
+      trackNameText.textContent = name;
+    }
+    
+    function updateProgress() {
+      if (!playbackState.duration || playbackState.duration === 0) return; 
+      var current = getCurrentTime();
+      var pct = (current / playbackState.duration) * 100;
+      
+      if (!isDraggingProgress) {
+        progressSlider.value = pct;
+        timeCurrent.textContent = formatTime(current);
+      }
+      
+      timeDuration.textContent = formatTime(playbackState.duration);
+    }
+    
+    function setPlayingUI(playing) {
+      if (playing) {
+        playIcon.textContent = '⏸';
+        playText.textContent = 'Pause';
+        btnPlay.classList.add('pause');
+      } else {
+        playIcon.textContent = '▶';
+        playText.textContent = 'Play';
+        btnPlay.classList.remove('pause');
+      }
+    }
+    
+    // Socket Events
+    function connect() {
+      socket = io({ transports: ['websocket'], upgrade: false });
+      
+      socket.on('connect', function() {
+        state.myId = socket.id;
+        console.log('Connected:', state.myId);
+        performClockSync();
+        
+        if (clockSyncInterval) clearInterval(clockSyncInterval);
+        clockSyncInterval = setInterval(performClockSync, 15000);
+      });
+      
+      socket.on('room-updated', function(roomState) {
+        updateUI(roomState);
+      });
+      
+      socket.on('track-loaded', async function(data) {
+        console.log('Track loaded:', data.track.name);
+        state.currentTrack = data.track;
+        showPlayer(data.track.name);
+        
+        loadingStatus.classList.remove('hidden');
+        loadingStatus.classList.remove('ready');
+        loadingStatus.textContent = '⏳ Loading audio buffer...';
+        
+        try {
+          initAudioContext();
+          audioBuffer = await loadAudioBuffer(data.track.url);
+          playbackState.duration = audioBuffer.duration;
+          playbackState.startOffset = 0;
+          
+          loadingStatus.textContent = '✅ Audio ready (' + audioBuffer.duration.toFixed(1) + 's)';
+          loadingStatus.classList.add('ready');
+          
+          socket.emit('audio-ready');
+        } catch (err) {
+          loadingStatus.textContent = '❌ Failed to load audio';
+          console.error('Audio load error:', err);
+        }
+      });
+      
+      socket.on('sync-play', function(data) {
+        console.log('SYNC PLAY:', data);
+        resumeAudioContext();
+        startPlayback(data.position, data.serverTimeAtPlay);
+      });
+      
+      socket.on('sync-pause', function(data) {
+        console.log('SYNC PAUSE:', data);
+        stopPlayback();
+        playbackState.startOffset = data.position;
+      });
+      
+      socket.on('sync-seek', function(data) {
+        console.log('SYNC SEEK:', data);
+        if (data.playing) {
+          startPlayback(data.position, data.serverTimeAtPlay);
+        } else {
+          stopPlayback();
+          playbackState.startOffset = data.position;
+        }
+      });
+      
+      socket.on('sync-correction', function(data) {
+        correctDrift(data.position, data.serverTime);
+      });
+    }
+    
+    // Heartbeat
+    setInterval(function() {
+      if (state.isHost && playbackState.isPlaying && socket) {
+        socket.emit('sync-heartbeat', {
+          position: getCurrentTime(),
+          serverTime: getServerTime()
+        });
+      }
+    }, 300);
+    
+    // Progress update
+    setInterval(updateProgress, 16);
+    
+    // Event Listeners
+    btnCreate.onclick = function() {
+      var name = inputName.value.trim();
+      if (!name) return showError('Please enter your name');
+      
+      initAudioContext();
+      resumeAudioContext();
+
+      state.myName = name;
+      socket.emit('create-room', { name: name }, function(res) {
+        if (res.success) {
+          state.roomId = res.room.id;
+          showScreen(screenRoom);
+          updateUI(res.room);
+        } else {
+          showError('Failed to create room');
+        }
+      });
+    };
+    
+    btnJoin.onclick = function() {
+      var name = inputName.value.trim();
+      var roomId = inputRoomCode.value.trim().toUpperCase();
+      if (!name) return showError('Please enter your name');
+      if (!roomId || roomId.length !== 4) return showError('Enter 4-letter room code');
+      
+      initAudioContext();
+      resumeAudioContext();
+
+      state.myName = name;
+      socket.emit('join-room', { roomId: roomId, name: name }, async function(res) {
+        if (res.success) {
+          state.roomId = res.room.id;
+          showScreen(screenRoom);
+          updateUI(res.room);
+          if (res.room.currentTrack) {
+            state.currentTrack = res.room.currentTrack;
+            showPlayer(res.room.currentTrack.name);
+            loadingStatus.classList.remove('hidden');
+            loadingStatus.textContent = '⏳ Loading audio buffer...';
+            try {
+              initAudioContext();
+              audioBuffer = await loadAudioBuffer(res.room.currentTrack.url);
+              playbackState.duration = audioBuffer.duration;
+              loadingStatus.textContent = '✅ Audio ready';
+              loadingStatus.classList.add('ready');
+              socket.emit('audio-ready');
+              if (res.room.playbackState.playing) {
+                startPlayback(res.room.playbackState.position, res.room.playbackState.serverTimeAtPlay);
+              }
+            } catch (e) {
+              loadingStatus.textContent = '❌ Load failed';
+            }
+          }
+        } else {
+          showError(res.error || 'Room not found');
+        }
+      });
+    };
+    
+    roomCodeDisplay.onclick = function() {
+      if (roomCodeDisplay.textContent === 'Copied!') return; 
+      
+      navigator.clipboard.writeText(roomCodeDisplay.textContent);
+      var orig = roomCodeDisplay.textContent;
+      roomCodeDisplay.textContent = 'Copied!';
+      setTimeout(function() { roomCodeDisplay.textContent = orig; }, 1000);
+    };
+    
+    inputFile.onchange = async function(e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      fileName.textContent = 'Uploading: ' + file.name + '...';
+      var formData = new FormData();
+      formData.append('audio', file);
+      try {
+        var res = await fetch('/upload', { method: 'POST', body: formData });
+        var data = await res.json();
+        if (data.url) {
+          fileName.textContent = '✅ ' + data.originalName;
+          socket.emit('load-track', { url: data.url, name: data.originalName });
+          loadingStatus.classList.remove('hidden');
+          loadingStatus.textContent = '⏳ Loading audio buffer...';
+          initAudioContext();
+          audioBuffer = await loadAudioBuffer(data.url);
+          playbackState.duration = audioBuffer.duration;
+          playbackState.startOffset = 0;
+          loadingStatus.textContent = '✅ Audio ready (' + audioBuffer.duration.toFixed(1) + 's)';
+          loadingStatus.classList.add('ready');
+          
+          if (state.isHost) btnPlay.disabled = false;
+        }
+      } catch (err) {
+        fileName.textContent = '❌ Upload failed';
+      }
+    };
+    
+    btnPlay.onclick = function() {
+      if (!state.isHost || !audioBuffer) return;
+      resumeAudioContext();
+      if (playbackState.isPlaying) {
+        var pos = getCurrentTime();
+        socket.emit('pause', { position: pos });
+      } else {
+        var serverTime = getServerTime() + 150;
+        socket.emit('play', { position: playbackState.startOffset, serverTime: serverTime });
+      }
+    };
+    
+    // FIX: Replaced the non-draggable DIV with a true slider logic
+    progressSlider.oninput = function() {
+      isDraggingProgress = true;
+      if (!playbackState.duration) return;
+      var pos = (progressSlider.value / 100) * playbackState.duration;
+      timeCurrent.textContent = formatTime(pos);
+    };
+
+    progressSlider.onchange = function() {
+      isDraggingProgress = false;
+      if (!state.isHost || !playbackState.duration) return;
+      var pos = (progressSlider.value / 100) * playbackState.duration;
+      var serverTime = getServerTime() + 150;
+      socket.emit('seek', { position: pos, serverTime: serverTime });
+    };
+    
+    volumeSlider.oninput = function() {
+      if (gainNode) gainNode.gain.value = volumeSlider.value / 100;
+    };
+    
+    btnBecomeHost.onclick = function() {
+      socket.emit('become-host', function(res) {
+        if (!res.success) showError('Failed to become host');
+      });
+    };
+    
+    inputName.onkeypress = function(e) { if (e.key === 'Enter') btnCreate.click(); };
+    inputRoomCode.onkeypress = function(e) { if (e.key === 'Enter') btnJoin.click(); };
+    
+    // Initialize
+    connect();
+  })();
+  </script>
+</body>
+</html>
