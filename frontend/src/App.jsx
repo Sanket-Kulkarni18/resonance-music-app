@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { syncService } from './SyncService.js';
+import { streamingTheaterService } from './StreamingTheaterService.js';
+import StreamingTheaterSetup from './StreamingTheaterSetup.jsx';
 import './App.css';
 
 const effectOptions = [
@@ -29,8 +31,9 @@ function App() {
   const [spatialMode, setSpatialMode] = useState('normal');
   const [devicePlacements, setDevicePlacements] = useState({});
   const [draggingId, setDraggingId] = useState(null);
-  const [hostRequest, setHostRequest] = useState(null); // { requesterId, requesterName }
+  const [hostRequest, setHostRequest] = useState(null);
   const [hostRequestPending, setHostRequestPending] = useState(false);
+  const [showStreamingSetup, setShowStreamingSetup] = useState(false);
   const mapRef = useRef(null);
   const lastSyncedPlacementsRef = useRef('');
   const draggingIdRef = useRef(null);
@@ -44,7 +47,6 @@ function App() {
       setSyncData((prev) => ({ ...prev, ...data }));
       if (data.roomState) {
         setRoomState(data.roomState);
-        // Do not clobber a position the user is actively dragging.
         if (data.roomState.placements && !draggingIdRef.current) {
           setDevicePlacements(data.roomState.placements);
         }
@@ -141,9 +143,9 @@ function App() {
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const handleCreate = async () => {
+  const handleCreate = async (streamingTheaterMode = false) => {
     if (!name.trim()) return showError('Please enter your name');
-    const res = await syncService.createRoom(name);
+    const res = await syncService.createRoom(name, streamingTheaterMode);
     if (res.success) setScreen('room');
     else showError('Failed to create room');
   };
@@ -208,6 +210,14 @@ function App() {
     syncService.updateAudioSettings({ effectPreset: selectedEffect, spatialMode: nextSpatialMode });
   };
 
+  const handleStreamingSetup = () => {
+    setShowStreamingSetup(true);
+  };
+
+  const handleStreamingSetupClose = () => {
+    setShowStreamingSetup(false);
+  };
+
   if (screen === 'landing') {
     return (
       <div className="screen">
@@ -230,8 +240,8 @@ function App() {
               />
             </div>
 
-            <button className="btn btn-primary" onClick={handleCreate}>
-              🎤 Create Room
+            <button className="btn btn-primary" onClick={() => handleCreate()}>
+              🎬 Create Room
             </button>
 
             <div className="divider">
@@ -239,7 +249,7 @@ function App() {
             </div>
 
             <div className="form-group">
-              <label className="form-label">🚪 Room Code</label>
+              <label className="form-label">🔑 Room Code</label>
               <input
                 type="text"
                 className="room-code-input"
@@ -262,7 +272,7 @@ function App() {
             </div>
 
             <button className="btn btn-secondary" onClick={handleJoin}>
-              🚪 Join Room
+              🔑 Join Room
             </button>
 
             {error && <p className="error">{error}</p>}
@@ -278,6 +288,9 @@ function App() {
   const ds = syncData.driftStats || {};
   const members = roomState?.members || [];
 
+  // Check if streaming theater mode is active
+  const isStreamingMode = roomState?.streamingTheaterMode || false;
+
   return (
     <div className="screen screen-room">
       <div className="container container-room">
@@ -288,11 +301,16 @@ function App() {
               {s.roomId || '----'}
             </div>
           </div>
-          <span
-            className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}
-          >
-            {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '⏳ Syncing...'}
-          </span>
+          <div className="header-right">
+            {isStreamingMode && (
+              <span className="streaming-badge">🎭 Streaming Mode</span>
+            )}
+            <span
+              className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}
+            >
+              {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '🔄 Syncing...'}
+            </span>
+          </div>
         </div>
 
         <div className="room-grid">
@@ -311,7 +329,7 @@ function App() {
 
             {s.isHost && (
               <div className="glass section">
-                <div className="section-title">🎧 Host Controls</div>
+                <div className="section-title">🎬 Host Controls</div>
                 <input
                   type="file"
                   id="input-file"
@@ -323,13 +341,21 @@ function App() {
                   📁 Choose Audio File
                 </label>
                 {syncData.statusText && <div className="file-name">{syncData.statusText}</div>}
+
+                {/* Streaming Theater Mode Button */}
+                <button 
+                  className="btn btn-streaming"
+                  onClick={handleStreamingSetup}
+                >
+                  🎭 Streaming Theater Mode
+                </button>
               </div>
             )}
           </div>
 
           <div className="col-right">
             <div className="glass section">
-              <div className="section-title">🎛 DJ &amp; Spatial Effects</div>
+              <div className="section-title">🎨 DJ & Spatial Effects</div>
 
               <div className="effect-row">
                 {effectOptions.map((option) => (
@@ -491,7 +517,7 @@ function App() {
               </div>
             ) : (
               <button className="btn-host" onClick={handleRequestHost}>
-                🎤 Request Host
+                🎬 Request Host
               </button>
             )}
           </div>
@@ -512,6 +538,16 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Streaming Theater Setup Modal */}
+      {showStreamingSetup && (
+        <div className="modal-overlay">
+          <StreamingTheaterSetup 
+            onBack={handleStreamingSetupClose} 
+            roomState={roomState}
+          />
+        </div>
+      )}
     </div>
   );
 }

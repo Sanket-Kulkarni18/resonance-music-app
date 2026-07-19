@@ -1,5 +1,6 @@
 // SyncPlay Server - OPTIMIZED for tight synchronization
 // Compatible with Node.js 12+
+// NOW WITH THEATER MODE SUPPORT - Option 3: Full Audio Streaming
 var express = require('express');
 var http = require('http');
 var Server = require('socket.io').Server;
@@ -9,6 +10,9 @@ var path = require('path');
 var uuidv4 = require('uuid').v4;
 var fs = require('fs');
 var os = require('os');
+
+// Import Streaming Theater Manager
+var StreamingTheaterManager = require('./theaterStreaming.js');
 
 var app = express();
 var server = http.createServer(app);
@@ -49,6 +53,35 @@ app.post('/upload', upload.single('audio'), function(req, res) {
   res.json({ url: url, originalName: req.file.originalname });
 });
 
+// Audio streaming endpoint for full streaming mode
+app.post('/api/stream-audio', express.raw({ type: 'audio/*', limit: '10mb' }), function(req, res) {
+  const roomId = req.headers['x-room-id'];
+  const timestamp = parseInt(req.headers['x-timestamp']) || Date.now();
+  const sequence = parseInt(req.headers['x-sequence']) || 0;
+  
+  if (!roomId) {
+    return res.status(400).json({ error: 'Room ID required' });
+  }
+  
+  // Get the room's io namespace
+  const roomNamespace = io.of('/' + roomId);
+  if (roomNamespace) {
+    // Broadcast to all clients in the room
+    roomNamespace.emit('audio-chunk', {
+      chunk: req.body,
+      timestamp,
+      sequence,
+      serverTime: Date.now()
+    });
+  }
+  
+  console.log(`Streamed audio chunk for room ${roomId}, seq=${sequence}`);
+  res.json({ success: true, roomId, timestamp, sequence });
+});
+
+// Initialize Streaming Theater Manager
+var streamingTheaterManager = new StreamingTheaterManager(io, rooms);
+
 // Room Management
 var rooms = new Map();
 var clientRTT = new Map();
@@ -64,6 +97,22 @@ function getRoomState(room) {
     if (rtt > maxRTT) maxRTT = rtt;
   });
   
+  // Include streaming theater info if available
+  var streamingInfo = {};
+  if (room.streamingTheaterMode) {
+    const stream = streamingTheaterManager.getAudioStreamState(room.id);
+    const speakers = streamingTheaterManager.getSpeakerConfigurations(room.id);
+    const assignments = streamingTheaterManager.getPhoneAssignments(room.id);
+    streamingInfo = {
+      streamingTheaterMode: true,
+      audioStreaming: stream.enabled,
+      streamConfig: stream.config,
+      speakerCount: speakers.speakers.length,
+      phoneCount: assignments.size,
+      videoSource: room.videoSource || null
+    };
+  }
+  
   return {
     id: room.id,
     hostId: room.hostId,
@@ -74,7 +123,8 @@ function getRoomState(room) {
     audioSettings: room.audioSettings || { effectPreset: 'none', spatialMode: 'normal' },
     maxRTT: Math.min(maxRTT, 500),
     readyCount: room.readyMembers ? room.readyMembers.size : 0,
-    totalCount: room.members.size
+    totalCount: room.members.size,
+    ...streamingInfo
   };
 }
 
@@ -121,15 +171,22 @@ io.on('connection', function(socket) {
       audioSettings: { effectPreset: 'none', spatialMode: 'normal' },
       hostTransferRequests: new Set(),
       readyMembers: new Set(),
-      syncSequence: 0
+      syncSequence: 0,
+      streamingTheaterMode: data.streamingTheaterMode || false,
+      videoSource: data.videoSource || null
     };
     room.members.set(socket.id, { id: socket.id, name: name, isHost: true });
     rooms.set(roomId, room);
 
+    // Initialize streaming theater mode if requested
+    if (room.streamingTheaterMode) {
+      streamingTheaterManager.initStreamingTheater(roomId, data.theaterConfig || {});
+    }
+
     socket.join(roomId);
     currentRoom = roomId;
 
-    console.log('Room ' + roomId + ' created by ' + name);
+    console.log('Room ' + roomId + ' created by ' + name + (room.streamingTheaterMode ? ' (Streaming Theater Mode)' : ''));
     callback({ success: true, room: getRoomState(room) });
   });
 
@@ -147,6 +204,22 @@ io.on('connection', function(socket) {
     currentRoom = roomId.toUpperCase();
 
     var state = getRoomState(room);
+    
+    // Send streaming theater info if active
+    if (room.streamingTheaterMode) {
+      const speakers = streamingTheaterManager.getSpeakerConfigurations(currentRoom);
+      const assignments = streamingTheaterManager.getPhoneAssignments(currentRoom);
+      const stream = streamingTheaterManager.getAudioStreamState(currentRoom);
+      
+      state.speakers = speakers.speakers;
+      state.phoneAssignments = Array.from(assignments.entries()).map(([phoneId, data]) => ({
+        phoneId,
+        ...data
+      }));
+      state.streamConfig = stream.config;
+      state.audioStreaming = stream.enabled;
+    }
+    
     io.to(currentRoom).emit('room-updated', state);
     console.log(name + ' joined room ' + roomId);
     callback({ success: true, room: state });
@@ -197,7 +270,13 @@ io.on('connection', function(socket) {
       if (rtt > maxRTT) maxRTT = rtt;
     });
     
-    var syncBuffer = Math.max(150, maxRTT + 100);
+    // Add streaming theater latency if active
+    if (room.streamingTheaterMode) {
+      const maxLatency = streamingTheaterManager.getMaxLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, maxLatency);
+    }
+    
+    var syncBuffer = Math.max(200, maxRTT + 150);
     var scheduledTime = serverTime() + syncBuffer;
     
     room.syncSequence++;
@@ -244,18 +323,25 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     var position = data.position;
     var wasPlaying = room.playbackState.playing;
-     
+    
     var maxRTT = 50;
     room.members.forEach(function(member) {
       var rtt = clientRTT.get(member.id) || 50;
       if (rtt > maxRTT) maxRTT = rtt;
     });
-    var syncBuffer = Math.max(100, maxRTT + 50);
+    
+    // Add streaming theater latency if active
+    if (room.streamingTheaterMode) {
+      const maxLatency = streamingTheaterManager.getMaxLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, maxLatency);
+    }
+    
+    var syncBuffer = Math.max(150, maxRTT + 100);
     var scheduledTime = wasPlaying ? serverTime() + syncBuffer : 0;
- 
+    
     room.syncSequence++;
     room.playbackState = {
       playing: wasPlaying,
@@ -263,7 +349,7 @@ io.on('connection', function(socket) {
       serverTimeAtPlay: scheduledTime,
       sequence: room.syncSequence
     };
- 
+    
     io.to(currentRoom).emit('sync-seek', {
       position: position,
       serverTimeAtPlay: scheduledTime,
@@ -277,7 +363,7 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     room.placements = data.placements || {};
     io.to(currentRoom).emit('room-updated', getRoomState(room));
     console.log('Updated placements in ' + currentRoom);
@@ -326,6 +412,139 @@ io.on('connection', function(socket) {
       member.lastReportTime = serverTime();
       member.drift = data.drift;
     }
+  });
+
+  // STREAMING THEATER MODE EVENTS - Option 3
+  
+  socket.on('enable-streaming-theater', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.streamingTheaterMode = true;
+    room.videoSource = data.videoSource || 'laptop';
+    streamingTheaterManager.initStreamingTheater(currentRoom, data.config || {});
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Streaming theater mode enabled in ' + currentRoom);
+    callback({ success: true, streamingTheaterMode: true });
+  });
+
+  socket.on('disable-streaming-theater', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.streamingTheaterMode = false;
+    room.videoSource = null;
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Streaming theater mode disabled in ' + currentRoom);
+    callback({ success: true, streamingTheaterMode: false });
+  });
+
+  socket.on('enable-streaming', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can enable streaming
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can enable streaming' });
+    }
+
+    // Store callback socket reference
+    data.socket = socket;
+    streamingTheaterManager.enableAudioStreaming(currentRoom, data, callback);
+  });
+
+  socket.on('disable-streaming', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can disable streaming
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can disable streaming' });
+    }
+
+    streamingTheaterManager.disableAudioStreaming(currentRoom, callback);
+  });
+
+  socket.on('stream-audio-chunk', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can stream
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can stream audio' });
+    }
+
+    streamingTheaterManager.streamAudioChunk(
+      currentRoom, 
+      data.chunk, 
+      data.timestamp, 
+      data.sequence,
+      callback
+    );
+  });
+
+  socket.on('assign-phone-to-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can assign
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can assign phones' });
+    }
+
+    streamingTheaterManager.assignPhoneToSpeaker(
+      currentRoom, 
+      data.phoneId, 
+      data.speakerId, 
+      data.latency,
+      data.volume,
+      callback
+    );
+  });
+
+  socket.on('unassign-phone-from-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host or the phone itself can unassign
+    if (room.hostId !== socket.id && socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Permission denied' });
+    }
+
+    streamingTheaterManager.unassignPhoneFromSpeaker(currentRoom, data.phoneId, callback);
+  });
+
+  socket.on('update-phone-settings', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    
+    // Only the phone itself can update its own settings
+    if (socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Can only update own settings' });
+    }
+
+    streamingTheaterManager.updatePhoneSettings(currentRoom, data.phoneId, data.settings, callback);
+  });
+
+  socket.on('streaming-video-position', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can send video position (laptop)
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can send video position' });
+    }
+
+    streamingTheaterManager.handleVideoPosition(currentRoom, data, callback);
   });
 
   socket.on('request-host-transfer', function(callback) {
@@ -390,8 +609,15 @@ io.on('connection', function(socket) {
       room.readyMembers.delete(socket.id);
     }
 
+    // Clean up streaming theater assignments for this phone
+    if (room.streamingTheaterMode) {
+      streamingTheaterManager.getPhoneAssignments(currentRoom).delete(socket.id);
+      streamingTheaterManager.broadcastAssignments(currentRoom);
+    }
+
     if (room.members.size === 0) {
       rooms.delete(currentRoom);
+      streamingTheaterManager.cleanupRoom(currentRoom);
       console.log('Room ' + currentRoom + ' deleted (empty)');
       return;
     }
@@ -431,6 +657,7 @@ var localIP = getLocalIP();
 server.listen(PORT, '0.0.0.0', function() {
   console.log('\n==================================================');
   console.log('  SyncPlay API Server v2.0 - OPTIMIZED');
+  console.log('  Theater Mode: Full Audio Streaming (Option 3)');
   console.log('==================================================');
   console.log('\n  Local API:   http://localhost:' + PORT);
   console.log('  Network API: http://' + localIP + ':' + PORT);
