@@ -1,13 +1,14 @@
 {
-  "name": "syncplay-client",
+  "name": "syncplay-frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "description": "SyncPlay frontend - Vite + React client for real-time multi-device audio sync",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint ."
   },
   "dependencies": {
     "react": "^19.2.7",

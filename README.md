@@ -1,132 +1,41 @@
-# 🎵 SyncPlay - Real Multi-Device Setup
+# 🎵 SyncPlay
 
-This folder contains everything you need to run SyncPlay with real multi-device synchronization.
+Real-time, multi-device audio synchronization app. One host uploads a track;
+every connected device plays it in tight sync with drift correction.
 
-## Quick Setup (5 minutes)
+## Structure
 
-### Step 1: Copy this folder
-
-Copy the entire `server-setup` folder to your computer:
 ```
-C:\syncplay\
-├── package.json
-├── index.js
-├── README.md
-└── client\
-    └── index.html
-```
-
-### Step 2: Open Terminal
-
-Open Command Prompt or PowerShell and navigate to the folder:
-```bash
-cd C:\syncplay
+resonance-music-app/
+├── backend/                # Express + Socket.IO server
+│   ├── index.js            # Server: rooms, uploads, sync, host transfer
+│   ├── uploads/            # Runtime audio files (git-ignored)
+│   ├── package.json
+│   └── README.md
+└── frontend/               # Vanilla JS Socket.IO client
+    ├── client/
+    │   └── index.html      # The working web app
+    └── package.json
 ```
 
-### Step 3: Install Dependencies
+## Run
 
 ```bash
+cd backend
 npm install
-```
-
-### Step 4: Start the Server
-
-```bash
 npm start
 ```
 
-You'll see output like this:
-```
-══════════════════════════════════════════════════
-🎵 SyncPlay Server is running!
-══════════════════════════════════════════════════
+Then open `http://localhost:5000` (served by the backend itself).
+Connect from other devices on the same WiFi using the server's network URL.
 
-📍 Local:   http://localhost:3000
-📱 Network: http://192.168.1.100:3000
+## How it works
 
-👆 Use the Network URL on your mobile phone!
-══════════════════════════════════════════════════
-```
-
-### Step 5: Connect Your Devices
-
-1. **On Laptop**: Open `http://localhost:3000`
-2. **On Mobile**: Open the Network URL (e.g., `http://192.168.1.100:3000`)
-
-> ⚠️ Both devices must be on the **same WiFi network**
-
-## How to Use
-
-1. **Create a Room** (on laptop or mobile)
-   - Enter your name
-   - Click "Create Room"
-   - You'll get a 4-letter code (e.g., `ABCD`)
-
-2. **Join from Other Device**
-   - Enter your name
-   - Enter the room code
-   - Click "Join Room"
-
-3. **Host Uploads Music**
-   - The host (room creator) uploads an audio file
-   - All devices will load the same track
-
-4. **Play in Sync!**
-   - Host clicks Play → everyone hears it at the same time
-   - Drift is automatically corrected every 3 seconds
-
-## Troubleshooting
-
-### "Can't connect from mobile"
-
-1. Make sure both devices are on the **same WiFi**
-2. Check Windows Firewall:
-   - Open Windows Security → Firewall → Allow an app
-   - Add Node.js or allow port 3000
-
-3. Try disabling firewall temporarily to test
-
-### "npm install fails"
-
-1. Use a short folder path: `C:\syncplay\`
-2. Enable Windows long paths:
-   ```powershell
-   # Run PowerShell as Admin
-   New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
-   ```
-
-### "Audio doesn't sync well"
-
-1. Make sure clock sync shows "✅ Synced"
-2. Both devices should show clock offset values
-3. Check drift display - it should stay under 50ms
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                                                     │
-│   LAPTOP (Host)          SERVER          MOBILE     │
-│   ┌─────────┐         ┌─────────┐      ┌─────────┐ │
-│   │ Browser │◄───────►│ Node.js │◄────►│ Browser │ │
-│   │ :3000   │ Socket  │ :3000   │      │         │ │
-│   └─────────┘   IO    └─────────┘      └─────────┘ │
-│        │                   │                │      │
-│        └───────────────────┴────────────────┘      │
-│                     Same WiFi                       │
-│                                                     │
-│   1. Clock sync (NTP-like)                         │
-│   2. Host uploads file → Server stores it          │
-│   3. Host: "Play at T+200ms" → Server broadcasts   │
-│   4. All devices schedule play() at same moment    │
-│   5. Every 3s: drift correction                    │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-```
-
-## Files
-
-- `package.json` - npm dependencies
-- `index.js` - Server code (Express + Socket.IO)
-- `client/index.html` - Web interface
-- `uploads/` - Created automatically for audio files
+1. **Clock sync** — each client samples 20 round-trips to compute offset + RTT.
+2. **Upload** — host uploads audio; server stores it in `uploads/`.
+3. **Play** — host triggers play; server schedules `now + syncBuffer` and
+   broadcasts it so every device starts at the same wall-clock instant.
+4. **Drift correction** — host sends a heartbeat every 300ms; clients resync
+   on >100ms drift or nudge playback rate on >15ms drift.
+5. **Audio graph** — Web Audio API applies echo / bass / treble and 8D / 16D /
+   Atmos spatial effects via an HRTF panner.
