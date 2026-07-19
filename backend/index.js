@@ -1,5 +1,6 @@
 // SyncPlay Server - OPTIMIZED for tight synchronization
 // Compatible with Node.js 12+
+// NOW WITH THEATER MODE SUPPORT - Option 2: Hybrid Laptop + Phones
 var express = require('express');
 var http = require('http');
 var Server = require('socket.io').Server;
@@ -9,6 +10,9 @@ var path = require('path');
 var uuidv4 = require('uuid').v4;
 var fs = require('fs');
 var os = require('os');
+
+// Import Hybrid Theater Manager
+var HybridTheaterManager = require('./theaterHybrid.js');
 
 var app = express();
 var server = http.createServer(app);
@@ -49,6 +53,25 @@ app.post('/upload', upload.single('audio'), function(req, res) {
   res.json({ url: url, originalName: req.file.originalname });
 });
 
+// Audio streaming endpoint for hybrid mode
+app.post('/stream-audio', express.raw({ type: 'audio/*', limit: '10mb' }), function(req, res) {
+  // Handle audio chunk streaming
+  const roomId = req.headers['x-room-id'];
+  const timestamp = parseInt(req.headers['x-timestamp']) || Date.now();
+  
+  if (!roomId) {
+    return res.status(400).json({ error: 'Room ID required' });
+  }
+  
+  // In a real implementation, we would broadcast this to the room
+  // For now, just acknowledge receipt
+  console.log(`Received audio chunk for room ${roomId} at ${timestamp}`);
+  res.json({ success: true, roomId, timestamp });
+});
+
+// Initialize Hybrid Theater Manager
+var hybridTheaterManager = new HybridTheaterManager(io, rooms);
+
 // Room Management
 var rooms = new Map();
 var clientRTT = new Map();
@@ -64,6 +87,20 @@ function getRoomState(room) {
     if (rtt > maxRTT) maxRTT = rtt;
   });
   
+  // Include hybrid theater info if available
+  var hybridInfo = {};
+  if (room.hybridTheaterMode) {
+    const groups = hybridTheaterManager.getSpeakerGroups(room.id);
+    const assignments = hybridTheaterManager.getPhoneAssignments(room.id);
+    hybridInfo = {
+      hybridTheaterMode: true,
+      speakerGroups: groups,
+      phoneCount: assignments.size,
+      videoSource: room.videoSource || null,
+      audioStreaming: hybridTheaterManager.audioStreaming.get(room.id) || { enabled: false }
+    };
+  }
+  
   return {
     id: room.id,
     hostId: room.hostId,
@@ -74,7 +111,8 @@ function getRoomState(room) {
     audioSettings: room.audioSettings || { effectPreset: 'none', spatialMode: 'normal' },
     maxRTT: Math.min(maxRTT, 500),
     readyCount: room.readyMembers ? room.readyMembers.size : 0,
-    totalCount: room.members.size
+    totalCount: room.members.size,
+    ...hybridInfo
   };
 }
 
@@ -121,15 +159,22 @@ io.on('connection', function(socket) {
       audioSettings: { effectPreset: 'none', spatialMode: 'normal' },
       hostTransferRequests: new Set(),
       readyMembers: new Set(),
-      syncSequence: 0
+      syncSequence: 0,
+      hybridTheaterMode: data.hybridTheaterMode || false,
+      videoSource: data.videoSource || null
     };
     room.members.set(socket.id, { id: socket.id, name: name, isHost: true });
     rooms.set(roomId, room);
 
+    // Initialize hybrid theater mode if requested
+    if (room.hybridTheaterMode) {
+      hybridTheaterManager.initHybridTheater(roomId, data.theaterConfig || {});
+    }
+
     socket.join(roomId);
     currentRoom = roomId;
 
-    console.log('Room ' + roomId + ' created by ' + name);
+    console.log('Room ' + roomId + ' created by ' + name + (room.hybridTheaterMode ? ' (Hybrid Theater Mode)' : ''));
     callback({ success: true, room: getRoomState(room) });
   });
 
@@ -147,6 +192,18 @@ io.on('connection', function(socket) {
     currentRoom = roomId.toUpperCase();
 
     var state = getRoomState(room);
+    
+    // Send hybrid theater assignments if active
+    if (room.hybridTheaterMode) {
+      const groups = hybridTheaterManager.getSpeakerGroups(currentRoom);
+      const assignments = hybridTheaterManager.getPhoneAssignments(currentRoom);
+      state.speakerGroups = groups;
+      state.phoneAssignments = Array.from(assignments.entries()).map(([phoneId, data]) => ({
+        phoneId,
+        ...data
+      }));
+    }
+    
     io.to(currentRoom).emit('room-updated', state);
     console.log(name + ' joined room ' + roomId);
     callback({ success: true, room: state });
@@ -197,6 +254,12 @@ io.on('connection', function(socket) {
       if (rtt > maxRTT) maxRTT = rtt;
     });
     
+    // Add hybrid theater latency if active
+    if (room.hybridTheaterMode) {
+      const maxLatency = hybridTheaterManager.getMaxLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, maxLatency);
+    }
+    
     var syncBuffer = Math.max(150, maxRTT + 100);
     var scheduledTime = serverTime() + syncBuffer;
     
@@ -244,18 +307,25 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     var position = data.position;
     var wasPlaying = room.playbackState.playing;
-     
+    
     var maxRTT = 50;
     room.members.forEach(function(member) {
       var rtt = clientRTT.get(member.id) || 50;
       if (rtt > maxRTT) maxRTT = rtt;
     });
+    
+    // Add hybrid theater latency if active
+    if (room.hybridTheaterMode) {
+      const maxLatency = hybridTheaterManager.getMaxLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, maxLatency);
+    }
+    
     var syncBuffer = Math.max(100, maxRTT + 50);
     var scheduledTime = wasPlaying ? serverTime() + syncBuffer : 0;
- 
+    
     room.syncSequence++;
     room.playbackState = {
       playing: wasPlaying,
@@ -263,7 +333,7 @@ io.on('connection', function(socket) {
       serverTimeAtPlay: scheduledTime,
       sequence: room.syncSequence
     };
- 
+    
     io.to(currentRoom).emit('sync-seek', {
       position: position,
       serverTimeAtPlay: scheduledTime,
@@ -277,7 +347,7 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     room.placements = data.placements || {};
     io.to(currentRoom).emit('room-updated', getRoomState(room));
     console.log('Updated placements in ' + currentRoom);
@@ -326,6 +396,133 @@ io.on('connection', function(socket) {
       member.lastReportTime = serverTime();
       member.drift = data.drift;
     }
+  });
+
+  // HYBRID THEATER MODE EVENTS - Option 2
+  
+  socket.on('enable-hybrid-theater', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.hybridTheaterMode = true;
+    room.videoSource = data.videoSource || 'laptop';
+    hybridTheaterManager.initHybridTheater(currentRoom, data.config || {});
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Hybrid theater mode enabled in ' + currentRoom);
+    callback({ success: true, hybridTheaterMode: true });
+  });
+
+  socket.on('disable-hybrid-theater', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.hybridTheaterMode = false;
+    room.videoSource = null;
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Hybrid theater mode disabled in ' + currentRoom);
+    callback({ success: true, hybridTheaterMode: false });
+  });
+
+  socket.on('assign-phone-to-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can assign
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can assign phones' });
+    }
+
+    hybridTheaterManager.assignPhoneToSpeaker(
+      currentRoom, 
+      data.phoneId, 
+      data.speakerId, 
+      data.speakerType, 
+      data.latency,
+      callback
+    );
+  });
+
+  socket.on('unassign-phone-from-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host or the phone itself can unassign
+    if (room.hostId !== socket.id && socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Permission denied' });
+    }
+
+    hybridTheaterManager.unassignPhoneFromSpeaker(currentRoom, data.phoneId, callback);
+  });
+
+  socket.on('update-phone-latency', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    
+    // Only the phone itself can update its own latency
+    if (socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Can only update own latency' });
+    }
+
+    hybridTheaterManager.updatePhoneLatency(currentRoom, data.phoneId, data.latency, callback);
+  });
+
+  socket.on('hybrid-video-position', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can send video position (laptop)
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can send video position' });
+    }
+
+    hybridTheaterManager.handleVideoPosition(currentRoom, data, callback);
+  });
+
+  socket.on('enable-audio-streaming', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can enable streaming
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can enable streaming' });
+    }
+
+    // Store callback socket reference
+    data.socket = socket;
+    hybridTheaterManager.enableAudioStreaming(currentRoom, data, callback);
+  });
+
+  socket.on('disable-audio-streaming', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can disable streaming
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can disable streaming' });
+    }
+
+    hybridTheaterManager.disableAudioStreaming(currentRoom, callback);
+  });
+
+  socket.on('stream-audio-chunk', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can stream
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can stream audio' });
+    }
+
+    hybridTheaterManager.streamAudioChunk(currentRoom, data.chunk, data.timestamp, callback);
   });
 
   socket.on('request-host-transfer', function(callback) {
@@ -390,8 +587,15 @@ io.on('connection', function(socket) {
       room.readyMembers.delete(socket.id);
     }
 
+    // Clean up hybrid theater assignments for this phone
+    if (room.hybridTheaterMode) {
+      hybridTheaterManager.getPhoneAssignments(currentRoom).delete(socket.id);
+      hybridTheaterManager.broadcastAssignments(currentRoom);
+    }
+
     if (room.members.size === 0) {
       rooms.delete(currentRoom);
+      hybridTheaterManager.cleanupRoom(currentRoom);
       console.log('Room ' + currentRoom + ' deleted (empty)');
       return;
     }
@@ -431,6 +635,7 @@ var localIP = getLocalIP();
 server.listen(PORT, '0.0.0.0', function() {
   console.log('\n==================================================');
   console.log('  SyncPlay API Server v2.0 - OPTIMIZED');
+  console.log('  Theater Mode: Hybrid Laptop + Phones (Option 2)');
   console.log('==================================================');
   console.log('\n  Local API:   http://localhost:' + PORT);
   console.log('  Network API: http://' + localIP + ':' + PORT);
