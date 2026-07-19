@@ -1,5 +1,6 @@
 // SyncPlay Server - OPTIMIZED for tight synchronization
 // Compatible with Node.js 12+
+// NOW WITH THEATER MODE SUPPORT - Option 1: Phone-as-Speaker
 var express = require('express');
 var http = require('http');
 var Server = require('socket.io').Server;
@@ -9,6 +10,9 @@ var path = require('path');
 var uuidv4 = require('uuid').v4;
 var fs = require('fs');
 var os = require('os');
+
+// Import Theater Manager
+var TheaterManager = require('./theater.js');
 
 var app = express();
 var server = http.createServer(app);
@@ -49,6 +53,9 @@ app.post('/upload', upload.single('audio'), function(req, res) {
   res.json({ url: url, originalName: req.file.originalname });
 });
 
+// Initialize Theater Manager
+var theaterManager = new TheaterManager(io, rooms);
+
 // Room Management
 var rooms = new Map();
 var clientRTT = new Map();
@@ -64,6 +71,16 @@ function getRoomState(room) {
     if (rtt > maxRTT) maxRTT = rtt;
   });
   
+  // Include theater mode info if available
+  var theaterInfo = {};
+  if (room.theaterMode) {
+    theaterInfo = {
+      theaterMode: true,
+      speakerCount: theaterManager.getSpeakerAssignments(room.id).size,
+      videoSource: room.videoSource || null
+    };
+  }
+  
   return {
     id: room.id,
     hostId: room.hostId,
@@ -74,7 +91,8 @@ function getRoomState(room) {
     audioSettings: room.audioSettings || { effectPreset: 'none', spatialMode: 'normal' },
     maxRTT: Math.min(maxRTT, 500),
     readyCount: room.readyMembers ? room.readyMembers.size : 0,
-    totalCount: room.members.size
+    totalCount: room.members.size,
+    ...theaterInfo
   };
 }
 
@@ -121,15 +139,22 @@ io.on('connection', function(socket) {
       audioSettings: { effectPreset: 'none', spatialMode: 'normal' },
       hostTransferRequests: new Set(),
       readyMembers: new Set(),
-      syncSequence: 0
+      syncSequence: 0,
+      theaterMode: data.theaterMode || false,
+      videoSource: data.videoSource || null
     };
     room.members.set(socket.id, { id: socket.id, name: name, isHost: true });
     rooms.set(roomId, room);
 
+    // Initialize theater mode if requested
+    if (room.theaterMode) {
+      theaterManager.initTheaterRoom(roomId);
+    }
+
     socket.join(roomId);
     currentRoom = roomId;
 
-    console.log('Room ' + roomId + ' created by ' + name);
+    console.log('Room ' + roomId + ' created by ' + name + (room.theaterMode ? ' (Theater Mode)' : ''));
     callback({ success: true, room: getRoomState(room) });
   });
 
@@ -147,6 +172,16 @@ io.on('connection', function(socket) {
     currentRoom = roomId.toUpperCase();
 
     var state = getRoomState(room);
+    
+    // Send speaker assignments if in theater mode
+    if (room.theaterMode) {
+      const assignments = theaterManager.getSpeakerAssignments(currentRoom);
+      state.speakerAssignments = Array.from(assignments.entries()).map(([phoneId, speakers]) => ({
+        phoneId,
+        speakers
+      }));
+    }
+    
     io.to(currentRoom).emit('room-updated', state);
     console.log(name + ' joined room ' + roomId);
     callback({ success: true, room: state });
@@ -197,6 +232,12 @@ io.on('connection', function(socket) {
       if (rtt > maxRTT) maxRTT = rtt;
     });
     
+    // Add Bluetooth latency if in theater mode
+    if (room.theaterMode) {
+      const bluetoothLatency = theaterManager.getMaxBluetoothLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, bluetoothLatency);
+    }
+    
     var syncBuffer = Math.max(150, maxRTT + 100);
     var scheduledTime = serverTime() + syncBuffer;
     
@@ -244,18 +285,25 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     var position = data.position;
     var wasPlaying = room.playbackState.playing;
-     
+    
     var maxRTT = 50;
     room.members.forEach(function(member) {
       var rtt = clientRTT.get(member.id) || 50;
       if (rtt > maxRTT) maxRTT = rtt;
     });
+    
+    // Add Bluetooth latency if in theater mode
+    if (room.theaterMode) {
+      const bluetoothLatency = theaterManager.getMaxBluetoothLatency(currentRoom);
+      maxRTT = Math.max(maxRTT, bluetoothLatency);
+    }
+    
     var syncBuffer = Math.max(100, maxRTT + 50);
     var scheduledTime = wasPlaying ? serverTime() + syncBuffer : 0;
- 
+    
     room.syncSequence++;
     room.playbackState = {
       playing: wasPlaying,
@@ -263,7 +311,7 @@ io.on('connection', function(socket) {
       serverTimeAtPlay: scheduledTime,
       sequence: room.syncSequence
     };
- 
+    
     io.to(currentRoom).emit('sync-seek', {
       position: position,
       serverTimeAtPlay: scheduledTime,
@@ -277,7 +325,7 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
+    
     room.placements = data.placements || {};
     io.to(currentRoom).emit('room-updated', getRoomState(room));
     console.log('Updated placements in ' + currentRoom);
@@ -326,6 +374,84 @@ io.on('connection', function(socket) {
       member.lastReportTime = serverTime();
       member.drift = data.drift;
     }
+  });
+
+  // THEATER MODE EVENTS - Option 1: Phone-as-Speaker
+  
+  socket.on('enable-theater-mode', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.theaterMode = true;
+    room.videoSource = data.videoSource || 'laptop';
+    theaterManager.initTheaterRoom(currentRoom);
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Theater mode enabled in ' + currentRoom);
+    callback({ success: true, theaterMode: true });
+  });
+
+  socket.on('disable-theater-mode', function(callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || room.hostId !== socket.id) return callback({ success: false, error: 'Not host' });
+
+    room.theaterMode = false;
+    room.videoSource = null;
+    
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    console.log('Theater mode disabled in ' + currentRoom);
+    callback({ success: true, theaterMode: false });
+  });
+
+  socket.on('assign-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host or the phone itself can assign
+    if (room.hostId !== socket.id && socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Permission denied' });
+    }
+
+    theaterManager.assignSpeaker(currentRoom, data.phoneId, data.speakerId, callback);
+  });
+
+  socket.on('unassign-speaker', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    if (room.hostId !== socket.id && socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Permission denied' });
+    }
+
+    theaterManager.unassignSpeaker(currentRoom, data.phoneId, data.speakerId, callback);
+  });
+
+  socket.on('set-bluetooth-latency', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    
+    // Only the phone itself can set its own latency
+    if (socket.id !== data.phoneId) {
+      return callback({ success: false, error: 'Can only set own latency' });
+    }
+
+    theaterManager.setBluetoothLatency(data.phoneId, data.latency, callback);
+  });
+
+  socket.on('video-position', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room) return callback({ success: false, error: 'Room not found' });
+
+    // Only host can send video position (laptop)
+    if (room.hostId !== socket.id) {
+      return callback({ success: false, error: 'Only host can send video position' });
+    }
+
+    theaterManager.handleVideoPosition(currentRoom, data, callback);
   });
 
   socket.on('request-host-transfer', function(callback) {
@@ -390,8 +516,15 @@ io.on('connection', function(socket) {
       room.readyMembers.delete(socket.id);
     }
 
+    // Clean up theater assignments for this phone
+    if (room.theaterMode) {
+      theaterManager.getSpeakerAssignments(currentRoom).delete(socket.id);
+      theaterManager.broadcastSpeakerAssignments(currentRoom);
+    }
+
     if (room.members.size === 0) {
       rooms.delete(currentRoom);
+      theaterManager.cleanupRoom(currentRoom);
       console.log('Room ' + currentRoom + ' deleted (empty)');
       return;
     }
@@ -431,6 +564,7 @@ var localIP = getLocalIP();
 server.listen(PORT, '0.0.0.0', function() {
   console.log('\n==================================================');
   console.log('  SyncPlay API Server v2.0 - OPTIMIZED');
+  console.log('  Theater Mode: Phone-as-Speaker (Option 1)');
   console.log('==================================================');
   console.log('\n  Local API:   http://localhost:' + PORT);
   console.log('  Network API: http://' + localIP + ':' + PORT);

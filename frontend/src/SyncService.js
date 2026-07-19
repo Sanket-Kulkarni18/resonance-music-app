@@ -214,12 +214,12 @@ class SyncService extends SimpleEventEmitter {
     }, 300);
   }
 
-  createRoom(name) {
+  createRoom(name, theaterMode = false) {
     return new Promise((resolve) => {
       this.initAudioContext();
       this.resumeAudioContext();
       this.state.myName = name;
-      this.socket.emit('create-room', { name }, (res) => {
+      this.socket.emit('create-room',  { name, theaterMode }, (res) => {
         if (res.success) {
           this.state.roomId = res.room.id;
           this.state.isHost = true;

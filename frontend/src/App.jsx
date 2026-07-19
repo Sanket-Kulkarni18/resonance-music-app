@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { syncService } from './SyncService.js';
+import { theaterService } from './TheaterService.js';
+import TheaterSetup from './TheaterSetup.jsx';
 import './App.css';
 
 const effectOptions = [
@@ -31,6 +33,7 @@ function App() {
   const [draggingId, setDraggingId] = useState(null);
   const [hostRequest, setHostRequest] = useState(null); // { requesterId, requesterName }
   const [hostRequestPending, setHostRequestPending] = useState(false);
+  const [showTheaterSetup, setShowTheaterSetup] = useState(false);
   const mapRef = useRef(null);
   const lastSyncedPlacementsRef = useRef('');
   const draggingIdRef = useRef(null);
@@ -141,9 +144,9 @@ function App() {
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const handleCreate = async () => {
+  const handleCreate = async (theaterMode = false) => {
     if (!name.trim()) return showError('Please enter your name');
-    const res = await syncService.createRoom(name);
+    const res = await syncService.createRoom(name, theaterMode);
     if (res.success) setScreen('room');
     else showError('Failed to create room');
   };
@@ -208,6 +211,14 @@ function App() {
     syncService.updateAudioSettings({ effectPreset: selectedEffect, spatialMode: nextSpatialMode });
   };
 
+  const handleTheaterSetup = () => {
+    setShowTheaterSetup(true);
+  };
+
+  const handleTheaterSetupClose = () => {
+    setShowTheaterSetup(false);
+  };
+
   if (screen === 'landing') {
     return (
       <div className="screen">
@@ -230,8 +241,8 @@ function App() {
               />
             </div>
 
-            <button className="btn btn-primary" onClick={handleCreate}>
-              🎤 Create Room
+            <button className="btn btn-primary" onClick={() => handleCreate()}>
+              🎬 Create Room
             </button>
 
             <div className="divider">
@@ -239,7 +250,7 @@ function App() {
             </div>
 
             <div className="form-group">
-              <label className="form-label">🚪 Room Code</label>
+              <label className="form-label">🔑 Room Code</label>
               <input
                 type="text"
                 className="room-code-input"
@@ -262,7 +273,7 @@ function App() {
             </div>
 
             <button className="btn btn-secondary" onClick={handleJoin}>
-              🚪 Join Room
+              🔑 Join Room
             </button>
 
             {error && <p className="error">{error}</p>}
@@ -278,6 +289,9 @@ function App() {
   const ds = syncData.driftStats || {};
   const members = roomState?.members || [];
 
+  // Check if theater mode is active
+  const isTheaterMode = roomState?.theaterMode || false;
+
   return (
     <div className="screen screen-room">
       <div className="container container-room">
@@ -288,11 +302,16 @@ function App() {
               {s.roomId || '----'}
             </div>
           </div>
-          <span
-            className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}
-          >
-            {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '⏳ Syncing...'}
-          </span>
+          <div className="header-right">
+            {isTheaterMode && (
+              <span className="theater-badge">🎭 Theater Mode</span>
+            )}
+            <span
+              className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}
+            >
+              {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '🔄 Syncing...'}
+            </span>
+          </div>
         </div>
 
         <div className="room-grid">
@@ -311,7 +330,7 @@ function App() {
 
             {s.isHost && (
               <div className="glass section">
-                <div className="section-title">🎧 Host Controls</div>
+                <div className="section-title">🎬 Host Controls</div>
                 <input
                   type="file"
                   id="input-file"
@@ -323,13 +342,21 @@ function App() {
                   📁 Choose Audio File
                 </label>
                 {syncData.statusText && <div className="file-name">{syncData.statusText}</div>}
+
+                {/* Theater Mode Button */}
+                <button 
+                  className="btn btn-theater"
+                  onClick={handleTheaterSetup}
+                >
+                  🎭 Theater Mode Setup
+                </button>
               </div>
             )}
           </div>
 
           <div className="col-right">
             <div className="glass section">
-              <div className="section-title">🎛 DJ &amp; Spatial Effects</div>
+              <div className="section-title">🎨 DJ & Spatial Effects</div>
 
               <div className="effect-row">
                 {effectOptions.map((option) => (
@@ -491,7 +518,7 @@ function App() {
               </div>
             ) : (
               <button className="btn-host" onClick={handleRequestHost}>
-                🎤 Request Host
+                🎬 Request Host
               </button>
             )}
           </div>
@@ -512,6 +539,16 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Theater Setup Modal */}
+      {showTheaterSetup && (
+        <div className="modal-overlay">
+          <TheaterSetup 
+            onBack={handleTheaterSetupClose} 
+            roomState={roomState}
+          />
+        </div>
+      )}
     </div>
   );
 }
