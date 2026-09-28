@@ -1,16 +1,13 @@
 import { io } from 'socket.io-client';
 
 // Resolve the backend URL.
-// - Dev: Vite proxies /socket.io to the backend, so same-origin works.
-// - Prod: set VITE_SOCKET_URL to the backend's public URL.
+// - The Vite dev server proxies Socket.IO and uploads, so use the browser's
+//   origin by default. This also works in an embedded preview environment.
+// - In production with a separately hosted API, set VITE_SOCKET_URL.
 function getServerBaseUrl() {
   const envUrl = import.meta.env.VITE_SOCKET_URL;
-  if (envUrl) return envUrl;
-
-  const protocol = window.location.protocol || 'http:';
-  const hostname = import.meta.env.VITE_SOCKET_HOST || window.location.hostname;
-  const port = import.meta.env.VITE_SOCKET_PORT || 5000;
-  return `${protocol}//${hostname}:${port}`;
+  if (envUrl) return envUrl.replace(/\/$/, '');
+  return window.location.origin;
 }
 
 class SimpleEventEmitter {
@@ -135,15 +132,27 @@ class SyncService extends SimpleEventEmitter {
       this.performClockSync();
       if (this.clockSyncInterval) clearInterval(this.clockSyncInterval);
       this.clockSyncInterval = setInterval(() => this.performClockSync(), 15000);
-      this.notifyUpdate();
+      this.notifyUpdate({ connectionState: 'connected' });
+    });
+
+    this.socket.on('disconnect', () => {
+      this.notifyUpdate({ connectionState: 'disconnected' });
+    });
+
+    this.socket.on('connect_error', () => {
+      this.notifyUpdate({ connectionState: 'disconnected' });
     });
 
     this.socket.on('room-updated', (roomState) => {
       this.state.isHost = roomState.hostId === this.state.myId;
-      if (roomState.currentTrack) this.state.currentTrack = roomState.currentTrack;
+      this.state.currentTrack = roomState.currentTrack || null;
       if (roomState.placements) this.devicePlacements = roomState.placements;
       if (roomState.audioSettings) this.audioSettings = roomState.audioSettings;
-      this.notifyUpdate({ roomState, audioSettings: this.audioSettings });
+      this.notifyUpdate({
+        roomState,
+        audioSettings: this.audioSettings,
+        devicePlacements: this.devicePlacements,
+      });
     });
 
     this.socket.on('audio-settings-updated', (audioSettings) => {
@@ -151,9 +160,13 @@ class SyncService extends SimpleEventEmitter {
       this.notifyUpdate({ audioSettings: this.audioSettings });
     });
 
+    this.socket.on('ready-state', (readyState) => {
+      this.notifyUpdate({ readyState });
+    });
+
     this.socket.on('track-loaded', async (data) => {
       this.state.currentTrack = data.track;
-      this.notifyUpdate({ loading: true, statusText: '⏳ Loading audio buffer...' });
+      this.notifyUpdate({ loading: true, audioReady: false, statusText: '⏳ Loading audio buffer...' });
 
       try {
         this.initAudioContext();
@@ -163,8 +176,8 @@ class SyncService extends SimpleEventEmitter {
 
         this.notifyUpdate({ loading: false, audioReady: true, statusText: '✅ Audio ready' });
         this.socket.emit('audio-ready');
-      } catch (err) {
-        this.notifyUpdate({ loading: false, statusText: '❌ Failed to load audio' });
+      } catch {
+        this.notifyUpdate({ loading: false, audioReady: false, statusText: '❌ Failed to load audio' });
       }
     });
 
@@ -214,18 +227,22 @@ class SyncService extends SimpleEventEmitter {
     }, 300);
   }
 
-  createRoom(name) {
+  createRoom(name, roomName) {
     return new Promise((resolve) => {
       this.initAudioContext();
       this.resumeAudioContext();
       this.state.myName = name;
-      this.socket.emit('create-room', { name }, (res) => {
+      this.socket.emit('create-room', { name, roomName }, (res) => {
         if (res.success) {
           this.state.roomId = res.room.id;
           this.state.isHost = true;
           this.audioSettings = res.room.audioSettings || this.audioSettings;
           this.devicePlacements = res.room.placements || {};
-          this.notifyUpdate({ roomState: res.room, audioSettings: this.audioSettings });
+          this.notifyUpdate({
+            roomState: res.room,
+            audioSettings: this.audioSettings,
+            devicePlacements: this.devicePlacements,
+          });
         }
         resolve(res);
       });
@@ -240,9 +257,17 @@ class SyncService extends SimpleEventEmitter {
       this.socket.emit('join-room', { roomId, name }, async (res) => {
         if (res.success) {
           this.state.roomId = res.room.id;
+          this.state.isHost = res.room.hostId === this.state.myId;
+          this.audioSettings = res.room.audioSettings || this.audioSettings;
+          this.devicePlacements = res.room.placements || {};
+          this.notifyUpdate({
+            roomState: res.room,
+            audioSettings: this.audioSettings,
+            devicePlacements: this.devicePlacements,
+          });
           if (res.room.currentTrack) {
             this.state.currentTrack = res.room.currentTrack;
-            this.notifyUpdate({ loading: true, statusText: '⏳ Loading audio buffer...' });
+            this.notifyUpdate({ loading: true, audioReady: false, statusText: '⏳ Loading audio buffer...' });
             try {
               this.initAudioContext();
               this.audioBuffer = await this.loadAudioBuffer(this.getTrackUrl(res.room.currentTrack.url));
@@ -252,8 +277,8 @@ class SyncService extends SimpleEventEmitter {
               if (res.room.playbackState.playing) {
                 this.startPlayback(res.room.playbackState.position, res.room.playbackState.serverTimeAtPlay);
               }
-            } catch (e) {
-              this.notifyUpdate({ loading: false, statusText: '❌ Load failed' });
+            } catch {
+              this.notifyUpdate({ loading: false, audioReady: false, statusText: '❌ Load failed' });
             }
           }
         }
@@ -297,7 +322,17 @@ class SyncService extends SimpleEventEmitter {
     });
   }
 
+  denyHostTransfer(requesterId) {
+    return new Promise((resolve) => {
+      this.socket.emit('deny-host-transfer', { requesterId }, (response) => {
+        if (response.success) this.notifyUpdate({ hostTransferRequest: null });
+        resolve(response);
+      });
+    });
+  }
+
   uploadFile(file) {
+    if (!file) return;
     const formData = new FormData();
     formData.append('audio', file);
     this.notifyUpdate({ statusText: `Uploading: ${file.name}...` });
@@ -307,14 +342,9 @@ class SyncService extends SimpleEventEmitter {
       .then(async (data) => {
         if (data.url) {
           this.notifyUpdate({ statusText: `✅ ${data.originalName}` });
+          // The server broadcasts track-loaded to the whole room, including
+          // the host. That shared event performs one buffer load per client.
           this.socket.emit('load-track', { url: data.url, name: data.originalName });
-          this.notifyUpdate({ loading: true, statusText: '⏳ Loading audio buffer...' });
-
-          this.initAudioContext();
-          this.audioBuffer = await this.loadAudioBuffer(this.getTrackUrl(data.url));
-          this.playbackState.duration = this.audioBuffer.duration;
-          this.playbackState.startOffset = 0;
-          this.notifyUpdate({ loading: false, audioReady: true, statusText: '✅ Audio ready' });
         }
       })
       .catch(() => this.notifyUpdate({ statusText: '❌ Upload failed' }));
@@ -347,6 +377,16 @@ class SyncService extends SimpleEventEmitter {
   syncDevicePlacements(placements) {
     if (!this.state.isHost || !this.socket) return;
     this.socket.emit('update-placements', { placements });
+  }
+
+  updateMyPlacement(placement) {
+    return new Promise((resolve) => {
+      if (!this.socket || !this.state.roomId) {
+        resolve({ success: false, error: 'Not connected to a room' });
+        return;
+      }
+      this.socket.emit('update-my-placement', { placement }, (response) => resolve(response));
+    });
   }
 
   updateAudioSettings(audioSettings) {
@@ -482,7 +522,9 @@ class SyncService extends SimpleEventEmitter {
   }
 
   getCurrentTime() {
-    if (!this.audioContext || !this.playbackState.isPlaying) return this.playbackState.startOffset;
+    if (!this.audioContext || !this.playbackState.isPlaying || !this.audioBuffer) {
+      return this.playbackState.startOffset;
+    }
     return Math.min(
       this.playbackState.startOffset + (this.audioContext.currentTime - this.playbackState.startTime),
       this.audioBuffer.duration,
@@ -573,7 +615,7 @@ class SyncService extends SimpleEventEmitter {
       try {
         this.sourceNode.stop();
         this.sourceNode.disconnect();
-      } catch (e) {
+      } catch {
         /* ignore */
       }
       this.sourceNode = null;
