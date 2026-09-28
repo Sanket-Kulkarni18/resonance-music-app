@@ -1,517 +1,265 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CheckCircle2, XCircle } from 'lucide-react';
 import { syncService } from './SyncService.js';
-import './App.css';
+import { Calibration } from './components/Calibration.jsx';
+import { LiveStudio } from './components/LiveStudio.jsx';
+import { RoomPortal } from './components/RoomPortal.jsx';
+import { TopArchitectureBar } from './components/TopArchitectureBar.jsx';
+import {
+  placementToPolar,
+  polarToPlacement,
+  SPATIAL_MODES,
+  zoneForAngle,
+} from './data/spatial.js';
 
-const effectOptions = [
-  { id: 'none', label: 'No Effect' },
-  { id: 'echo', label: 'Echo' },
-  { id: 'bassBoost', label: 'Bass Boost' },
-  { id: 'trebleBoost', label: 'Treble Boost' },
-];
-
-const spatialModes = [
-  { id: 'normal', label: 'Normal' },
-  { id: '8d', label: '8D' },
-  { id: '16d', label: '16D' },
-  { id: 'atmos', label: 'Dolby Atmos' },
-];
+const EMPTY_MEMBERS = [];
 
 function App() {
-  const [screen, setScreen] = useState('landing');
-  const [roomState, setRoomState] = useState(null);
-  const [syncData, setSyncData] = useState({});
-  const [error, setError] = useState('');
-  const [name, setName] = useState('');
+  const [activePage, setActivePage] = useState('portal');
+  const [displayName, setDisplayName] = useState('');
+  const [roomName, setRoomName] = useState('MY SPATIAL ROOM');
   const [roomCode, setRoomCode] = useState('');
-  const [progress, setProgress] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
-  const [selectedEffect, setSelectedEffect] = useState('none');
-  const [spatialMode, setSpatialMode] = useState('normal');
-  const [devicePlacements, setDevicePlacements] = useState({});
-  const [draggingId, setDraggingId] = useState(null);
-  const [hostRequest, setHostRequest] = useState(null); // { requesterId, requesterName }
-  const [hostRequestPending, setHostRequestPending] = useState(false);
-  const mapRef = useRef(null);
-  const lastSyncedPlacementsRef = useRef('');
-  const draggingIdRef = useRef(null);
+  const [selectedMode, setSelectedMode] = useState('8d');
+  const [roomState, setRoomState] = useState(null);
+  const [syncData, setSyncData] = useState(() => ({
+    state: { ...syncService.state },
+    playbackState: { ...syncService.playbackState },
+    clockSync: { ...syncService.clockSync },
+    driftStats: { ...syncService.driftStats },
+    audioSettings: { ...syncService.audioSettings },
+    devicePlacements: { ...syncService.devicePlacements },
+  }));
+  const [busy, setBusy] = useState(false);
+  const [notification, setNotification] = useState(null);
+  const [playbackTick, setPlaybackTick] = useState(0);
+  const noticeTimeout = useRef(null);
 
-  useEffect(() => {
-    draggingIdRef.current = draggingId;
-  }, [draggingId]);
+  const showNotice = (message, type = 'success') => {
+    window.clearTimeout(noticeTimeout.current);
+    setNotification({ message, type });
+    noticeTimeout.current = window.setTimeout(() => setNotification(null), 4200);
+  };
 
   useEffect(() => {
     syncService.onUpdate = (data) => {
-      setSyncData((prev) => ({ ...prev, ...data }));
+      const nextData = data.roomState?.placements
+        ? { ...data, devicePlacements: data.roomState.placements }
+        : data;
+      setSyncData((previous) => ({ ...previous, ...nextData }));
       if (data.roomState) {
         setRoomState(data.roomState);
-        // Do not clobber a position the user is actively dragging.
-        if (data.roomState.placements && !draggingIdRef.current) {
-          setDevicePlacements(data.roomState.placements);
-        }
+        if (data.roomState.id) setRoomCode(data.roomState.id);
+        if (data.roomState.name) setRoomName(data.roomState.name);
       }
-      if (data.hostTransferRequest) {
-        setHostRequest(data.hostTransferRequest);
+      if (data.audioSettings) {
+        const nextMode = SPATIAL_MODES[data.audioSettings.spatialMode] ? data.audioSettings.spatialMode : 'normal';
+        setSelectedMode(nextMode);
+        syncService.setEffectPreset(data.audioSettings.effectPreset || 'none');
+        syncService.setSpatialMode(nextMode);
       }
-      if (data.hostRequestPending !== undefined) {
-        setHostRequestPending(data.hostRequestPending);
-      }
+      if (data.error) showNotice(data.error, 'error');
     };
 
-    const interval = setInterval(() => {
-      if (!isDragging && syncService.playbackState.duration > 0) {
-        setProgress((syncService.getCurrentTime() / syncService.playbackState.duration) * 100);
-      }
-    }, 16);
-
-    return () => clearInterval(interval);
-  }, [isDragging]);
-
-  useEffect(() => {
-    if (!roomState) return;
-    setDevicePlacements((prev) => {
-      const updated = { ...prev };
-      roomState.members.forEach((member, index) => {
-        if (!updated[member.id]) {
-          const angle = (360 / Math.max(1, roomState.members.length)) * index;
-          const rad = (angle * Math.PI) / 180;
-          updated[member.id] = { x: Math.cos(rad) * 0.55, y: Math.sin(rad) * 0.55 };
-        }
-      });
-      return updated;
-    });
-  }, [roomState?.members?.length]);
-
-  useEffect(() => {
-    syncService.setEffectPreset(selectedEffect);
-  }, [selectedEffect]);
-
-  useEffect(() => {
-    syncService.setSpatialMode(spatialMode);
-  }, [spatialMode]);
-
-  useEffect(() => {
-    if (!syncData.audioSettings) return;
-    setSelectedEffect(syncData.audioSettings.effectPreset || 'none');
-    setSpatialMode(syncData.audioSettings.spatialMode || 'normal');
-  }, [syncData.audioSettings]);
-
-  useEffect(() => {
-    syncService.setDevicePlacements(devicePlacements);
-  }, [devicePlacements]);
-
-  useEffect(() => {
-    if (!syncData.state?.isHost || draggingId) return;
-    if (Object.keys(devicePlacements).length === 0) return;
-    const placementsString = JSON.stringify(devicePlacements);
-    if (placementsString === lastSyncedPlacementsRef.current) return;
-    syncService.syncDevicePlacements(devicePlacements);
-    lastSyncedPlacementsRef.current = placementsString;
-  }, [devicePlacements, draggingId, syncData.state?.isHost]);
-
-  useEffect(() => {
-    if (!draggingId) return;
-
-    const handleMove = (event) => {
-      if (!mapRef.current) return;
-      const rect = mapRef.current.getBoundingClientRect();
-      const x = ((event.clientX - rect.left) / rect.width - 0.5) * 2;
-      const y = ((event.clientY - rect.top) / rect.height - 0.5) * 2;
-      const clamp = (value) => Math.max(-0.9, Math.min(0.9, value));
-      setDevicePlacements((prev) => ({
-        ...prev,
-        [draggingId]: { x: clamp(x), y: clamp(y) },
-      }));
-    };
-
-    const handleUp = () => setDraggingId(null);
-
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleUp);
-
+    const timeline = window.setInterval(() => setPlaybackTick(syncService.getCurrentTime()), 100);
     return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
+      window.clearInterval(timeline);
+      window.clearTimeout(noticeTimeout.current);
+      if (syncService.onUpdate) syncService.onUpdate = null;
     };
-  }, [draggingId]);
+  }, []);
 
-  const formatTime = (seconds) => {
-    if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  const appState = syncData.state || syncService.state;
+  const inRoom = Boolean(roomState?.id || appState?.roomId);
+  const isHost = Boolean(appState?.isHost);
+  const audioSettings = syncData.audioSettings || syncService.audioSettings || {};
+  const activeMode = SPATIAL_MODES[audioSettings.spatialMode] ? audioSettings.spatialMode : selectedMode;
+  const effectPreset = audioSettings.effectPreset || 'none';
+  const placements = useMemo(() => ({
+    ...(roomState?.placements || {}),
+    ...(syncData.devicePlacements || {}),
+  }), [roomState?.placements, syncData.devicePlacements]);
+  const clockSync = syncData.clockSync || syncService.clockSync;
+  const currentRoomName = roomState?.name || roomName;
+  const currentRoomCode = appState?.roomId || roomState?.id || roomCode;
+  const members = roomState?.members || EMPTY_MEMBERS;
+
+  const peers = useMemo(() => {
+    const total = Math.max(1, members.length);
+    return members.map((member, index) => {
+      const fallbackAngle = Math.round((index / total) * 360);
+      const fallbackDistance = member.isHost ? 0.58 : 0.72;
+      const position = placementToPolar(placements[member.id], fallbackAngle, fallbackDistance);
+      const zone = zoneForAngle(position.angleDeg);
+      const peerRtt = member.id === appState?.myId
+        ? Math.max(0, Math.round(Number(clockSync?.rtt) || 0))
+        : Math.max(0, Math.round(Number(roomState?.maxRTT) || Number(clockSync?.rtt) || 0));
+
+      return {
+        id: member.id,
+        name: member.name || 'Connected device',
+        deviceModel: member.id === appState?.myId ? 'This browser' : 'Connected browser',
+        role: member.isHost ? 'HOST' : 'PEER',
+        channelLabel: zone.code,
+        angleDeg: position.angleDeg,
+        distanceRing: position.distanceRing,
+        latencyMs: peerRtt,
+        syncLocked: Boolean(clockSync?.synced),
+        isMe: member.id === appState?.myId,
+      };
+    });
+  }, [members, placements, appState?.myId, clockSync?.rtt, clockSync?.synced, roomState?.maxRTT]);
+
+  const localPeer = peers.find((peer) => peer.isMe) || peers[0];
+  const currentTrack = appState?.currentTrack || roomState?.currentTrack || null;
+  const playbackState = {
+    ...(syncData.playbackState || syncService.playbackState),
+    currentTrack,
+  };
+  const currentTime = playbackState.isPlaying ? playbackTick : syncService.getCurrentTime();
+  const readyState = syncData.readyState || {
+    readyCount: roomState?.readyCount || 0,
+    totalCount: roomState?.totalCount || peers.length,
   };
 
-  const handleCreate = async () => {
-    if (!name.trim()) return showError('Please enter your name');
-    const res = await syncService.createRoom(name);
-    if (res.success) setScreen('room');
-    else showError('Failed to create room');
+  const handleCreate = async (skipCalibration) => {
+    if (!displayName.trim()) return showNotice('Enter your display name before creating a room.', 'error');
+    if (!roomName.trim()) return showNotice('Give the room a name before creating it.', 'error');
+    setBusy(true);
+    try {
+      const response = await syncService.createRoom(displayName.trim(), roomName.trim());
+      if (!response?.success) return showNotice(response?.error || 'Unable to create the room.', 'error');
+      setRoomState(response.room);
+      setRoomCode(response.room.id);
+      setRoomName(response.room.name || roomName.trim());
+      syncService.setEffectPreset(effectPreset);
+      syncService.setSpatialMode(selectedMode);
+      syncService.updateAudioSettings({ effectPreset, spatialMode: selectedMode });
+      setActivePage(skipCalibration ? 'studio' : 'calibration');
+      showNotice(`Room ${response.room.id} is live. Share the code with your peers.`);
+    } catch {
+      showNotice('Unable to create the room. Check that the sync server is running.', 'error');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleJoin = async () => {
-    if (!name.trim() || roomCode.length !== 4) return showError('Enter name and 4-letter code');
-    const res = await syncService.joinRoom(roomCode, name);
-    if (res.success) setScreen('room');
-    else showError(res.error || 'Room not found');
+  const handleJoin = async (skipCalibration) => {
+    const normalizedCode = roomCode.trim().toUpperCase();
+    if (!displayName.trim()) return showNotice('Enter your display name before joining a room.', 'error');
+    if (normalizedCode.length !== 4) return showNotice('Enter the full four-character room code.', 'error');
+    setBusy(true);
+    try {
+      const response = await syncService.joinRoom(normalizedCode, displayName.trim());
+      if (!response?.success) return showNotice(response?.error || 'Room not found.', 'error');
+      setRoomState(response.room);
+      setRoomCode(response.room.id);
+      setRoomName(response.room.name || 'SPATIAL ROOM');
+      const nextMode = SPATIAL_MODES[response.room.audioSettings?.spatialMode]
+        ? response.room.audioSettings.spatialMode
+        : 'normal';
+      setSelectedMode(nextMode);
+      syncService.setEffectPreset(response.room.audioSettings?.effectPreset || 'none');
+      syncService.setSpatialMode(nextMode);
+      setActivePage(skipCalibration ? 'studio' : 'calibration');
+      showNotice(`Connected to ${response.room.name || response.room.id}.`);
+    } catch {
+      showNotice('Unable to join the room. Check the room code and server connection.', 'error');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const showError = (msg) => {
-    setError(msg);
-    setTimeout(() => setError(''), 3500);
+  const handleNavigate = (page) => {
+    if (page === 'portal' && inRoom) {
+      showNotice('This device is already in a room. Use Calibration or Live Studio to continue.', 'error');
+      return;
+    }
+    if (page !== 'portal' && !inRoom) {
+      showNotice('Create or join a room before opening the studio.', 'error');
+      return;
+    }
+    setActivePage(page);
+  };
+
+  const handleModeChange = (spatialMode) => {
+    if (!isHost) return;
+    setSelectedMode(spatialMode);
+    syncService.setSpatialMode(spatialMode);
+    syncService.updateAudioSettings({ effectPreset, spatialMode });
+  };
+
+  const handleEffectChange = (nextEffect) => {
+    if (!isHost) return;
+    syncService.setEffectPreset(nextEffect);
+    syncService.updateAudioSettings({ effectPreset: nextEffect, spatialMode: activeMode });
+  };
+
+  const handleSavePlacement = async (placement) => {
+    const myId = appState?.myId;
+    if (!myId) return;
+    const nextPlacement = { x: placement.x, y: placement.y };
+    syncService.setDevicePlacements({ [myId]: nextPlacement });
+    const result = await syncService.updateMyPlacement(nextPlacement);
+    if (!result?.success) showNotice(result?.error || 'Unable to save this speaker placement.', 'error');
+    else showNotice('Speaker placement saved to the room map.');
+  };
+
+  const handleRotatePeer = (peerId, deltaDegrees) => {
+    if (!isHost) return;
+    const peer = peers.find((entry) => entry.id === peerId);
+    if (!peer) return;
+    const nextAngle = (peer.angleDeg + deltaDegrees + 360) % 360;
+    const nextPlacements = {
+      ...(roomState?.placements || {}),
+      ...(syncData.devicePlacements || {}),
+      [peerId]: polarToPlacement(nextAngle, peer.distanceRing),
+    };
+    syncService.setDevicePlacements(nextPlacements);
+    syncService.syncDevicePlacements(nextPlacements);
   };
 
   const handleRequestHost = async () => {
     const result = await syncService.requestHostTransfer();
-    if (!result.success) showError(result.error || 'Unable to request host controls');
+    if (!result?.success) showNotice(result?.error || 'Unable to request host controls.', 'error');
+    else showNotice('Host control request sent.');
   };
 
-  const handleApproveHostRequest = async () => {
-    if (hostRequest) {
-      const result = await syncService.approveHostTransfer(hostRequest.requesterId);
-      if (!result.success) showError(result.error || 'Unable to transfer host controls');
-    }
+  const handleApproveHost = async () => {
+    const requesterId = syncData.hostTransferRequest?.requesterId;
+    if (!requesterId) return;
+    const result = await syncService.approveHostTransfer(requesterId);
+    if (!result?.success) showNotice(result?.error || 'Unable to transfer host controls.', 'error');
+    else showNotice('Host controls transferred.');
   };
 
-  const handleDenyHostRequest = () => {
-    if (hostRequest) {
-      setHostRequest(null);
-      showError('Host request denied');
-    }
+  const handleDenyHost = async () => {
+    const requesterId = syncData.hostTransferRequest?.requesterId;
+    if (!requesterId) return;
+    const result = await syncService.denyHostTransfer(requesterId);
+    if (!result?.success) showNotice(result?.error || 'Unable to deny that request.', 'error');
   };
-
-  const copyRoomCode = () => {
-    navigator.clipboard.writeText(syncData.state?.roomId);
-    showError('✅ Room code copied!');
-  };
-
-  const handleDragStart = (memberId, event) => {
-    if (!syncData.state?.isHost) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDraggingId(memberId);
-  };
-
-  const getMapPositionStyle = (placement) => ({
-    left: `${50 + placement.x * 38}%`,
-    top: `${50 + placement.y * 38}%`,
-  });
-
-  const handleEffectChange = (effectPreset) => {
-    if (!syncData.state?.isHost) return;
-    setSelectedEffect(effectPreset);
-    syncService.updateAudioSettings({ effectPreset, spatialMode });
-  };
-
-  const handleSpatialModeChange = (nextSpatialMode) => {
-    if (!syncData.state?.isHost) return;
-    setSpatialMode(nextSpatialMode);
-    syncService.updateAudioSettings({ effectPreset: selectedEffect, spatialMode: nextSpatialMode });
-  };
-
-  if (screen === 'landing') {
-    return (
-      <div className="screen">
-        <div className="container">
-          <div className="landing-hero">
-            <div className="logo">🎵</div>
-            <h1>SyncPlay</h1>
-            <p className="subtitle">Precision Audio Sync • Real-Time Synchronization</p>
-          </div>
-
-          <div className="glass glass-strong card">
-            <div className="form-group">
-              <label className="form-label">👤 Your Name</label>
-              <input
-                type="text"
-                placeholder="Enter your name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleCreate()}
-              />
-            </div>
-
-            <button className="btn btn-primary" onClick={handleCreate}>
-              🎤 Create Room
-            </button>
-
-            <div className="divider">
-              <span>or join existing room</span>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">🚪 Room Code</label>
-              <input
-                type="text"
-                className="room-code-input"
-                placeholder="XXXX"
-                maxLength={4}
-                value={roomCode}
-                onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                onKeyPress={(e) => e.key === 'Enter' && handleJoin()}
-              />
-              <p
-                style={{
-                  fontSize: '0.8rem',
-                  color: 'var(--text-dim)',
-                  marginTop: '6px',
-                  textAlign: 'center',
-                }}
-              >
-                4-character code from host
-              </p>
-            </div>
-
-            <button className="btn btn-secondary" onClick={handleJoin}>
-              🚪 Join Room
-            </button>
-
-            {error && <p className="error">{error}</p>}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const s = syncData.state || {};
-  const ps = syncData.playbackState || {};
-  const cs = syncData.clockSync || {};
-  const ds = syncData.driftStats || {};
-  const members = roomState?.members || [];
 
   return (
-    <div className="screen screen-room">
-      <div className="container container-room">
-        <div className="glass room-header">
-          <div className="header-left">
-            <h2>🎵 SyncPlay</h2>
-            <div className="room-code" onClick={copyRoomCode} title="Click to copy room code">
-              {s.roomId || '----'}
-            </div>
-          </div>
-          <span
-            className={`sync-badge ${cs.rtt < 30 ? 'excellent' : cs.rtt < 80 ? '' : 'syncing'}`}
-          >
-            {cs.rtt < 30 ? '✨ Excellent' : cs.rtt < 80 ? '✅ Good' : '⏳ Syncing...'}
-          </span>
-        </div>
+    <div className="min-h-screen bg-[#090A0F] text-[#F3F5F8] selection:bg-[#FF5500]/30 selection:text-white">
+      <TopArchitectureBar
+        activePage={activePage}
+        onNavigate={handleNavigate}
+        inRoom={inRoom}
+        isHost={isHost}
+        roomCode={currentRoomCode}
+        roomName={currentRoomName}
+        activeMode={activeMode}
+        peerCount={peers.length}
+        connected={syncData.connectionState !== 'disconnected' && Boolean(syncService.socket?.connected)}
+      />
 
-        <div className="room-grid">
-          <div className="col-left">
-            <div className="glass section">
-              <div className="section-title">👥 Room Members ({members.length})</div>
-              <div className="members-list">
-                {members.map((m) => (
-                  <div key={m.id} className={`member-chip ${m.isHost ? 'host' : ''}`}>
-                    {m.isHost ? '👑 ' : '👤 '}
-                    {m.name} {m.id === s.myId ? '(You)' : ''}
-                  </div>
-                ))}
-              </div>
-            </div>
+      <main>
+        {activePage === 'portal' && <RoomPortal displayName={displayName} setDisplayName={setDisplayName} roomName={roomName} setRoomName={setRoomName} roomCode={roomCode} setRoomCode={setRoomCode} activeMode={selectedMode} setActiveMode={setSelectedMode} onCreate={handleCreate} onJoin={handleJoin} busy={busy} error={notification?.type === 'error' ? notification.message : ''} />}
+        {activePage === 'calibration' && inRoom && <Calibration roomCode={currentRoomCode} roomName={currentRoomName} activeMode={activeMode} peers={peers} localPeer={localPeer} clockSync={clockSync} onBack={() => setActivePage('studio')} onEnterStudio={() => setActivePage('studio')} onSavePlacement={handleSavePlacement} />}
+        {activePage === 'studio' && inRoom && <LiveStudio isHost={isHost} roomCode={currentRoomCode} roomName={currentRoomName} activeMode={activeMode} effectPreset={effectPreset} peers={peers} playbackState={playbackState} currentTime={currentTime} clockSync={clockSync} readyState={readyState} audioReady={Boolean(syncData.audioReady)} statusText={syncData.statusText} hostRequest={syncData.hostTransferRequest} hostRequestPending={syncData.hostRequestPending} onNavigate={handleNavigate} onChangeMode={handleModeChange} onChangeEffect={handleEffectChange} onTogglePlay={() => syncService.togglePlay()} onSeek={(position) => syncService.seek(position)} onSetVolume={(value) => syncService.setVolume(value)} onUpload={(file) => syncService.uploadFile(file)} onRotatePeer={handleRotatePeer} onResync={() => syncService.performClockSync()} onRequestHost={handleRequestHost} onApproveHost={handleApproveHost} onDenyHost={handleDenyHost} />}
+      </main>
 
-            {s.isHost && (
-              <div className="glass section">
-                <div className="section-title">🎧 Host Controls</div>
-                <input
-                  type="file"
-                  id="input-file"
-                  className="file-input"
-                  accept="audio/*"
-                  onChange={(e) => syncService.uploadFile(e.target.files[0])}
-                />
-                <label htmlFor="input-file" className="upload-btn">
-                  📁 Choose Audio File
-                </label>
-                {syncData.statusText && <div className="file-name">{syncData.statusText}</div>}
-              </div>
-            )}
-          </div>
-
-          <div className="col-right">
-            <div className="glass section">
-              <div className="section-title">🎛 DJ &amp; Spatial Effects</div>
-
-              <div className="effect-row">
-                {effectOptions.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    className={`effect-chip ${selectedEffect === option.id ? 'active' : ''}`}
-                    disabled={!s.isHost}
-                    onClick={() => handleEffectChange(option.id)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="spatial-row">
-                {spatialModes.map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    className={`effect-chip ${spatialMode === mode.id ? 'active' : ''}`}
-                    disabled={!s.isHost}
-                    onClick={() => handleSpatialModeChange(mode.id)}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-
-              <p className="section-note">
-                Drag devices around the host to shape the 8D/16D sound field. Dolby Atmos adds overhead
-                depth and soft ambient reverb.
-                {!s.isHost && ' The host controls this mix.'}
-              </p>
-
-              <div className="device-map" ref={mapRef}>
-                <div className="host-node">Host</div>
-                {members.map((member) => {
-                  const placement = devicePlacements[member.id] || { x: 0, y: -0.6 };
-                  return (
-                    <div
-                      role="button"
-                      key={member.id}
-                      className={`device-node ${draggingId === member.id ? 'dragging' : ''}`}
-                      style={getMapPositionStyle(placement)}
-                      onPointerDown={(e) => handleDragStart(member.id, e)}
-                      title={member.isHost ? 'Host position' : `Drag to reposition ${member.name}`}
-                    >
-                      {member.isHost ? '👑 Host' : member.name}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          <div className="glass section section-full">
-            {!s.currentTrack ? (
-              <div className="no-track">
-                <div className="icon">🎵</div>
-                <p>No track loaded</p>
-                <p style={{ fontSize: '0.9rem' }}>
-                  {s.isHost ? '📤 Upload a song to get started' : '⏳ Waiting for host...'}
-                </p>
-              </div>
-            ) : (
-              <div className="player-layout">
-                <div className="player-main">
-                  <div className="track-name">🎵 {s.currentTrack.name}</div>
-
-                  <input
-                    type="range"
-                    className="progress-slider"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    value={progress}
-                    onMouseDown={() => setIsDragging(true)}
-                    onChange={(e) => setProgress(e.target.value)}
-                    onMouseUp={(e) => {
-                      setIsDragging(false);
-                      syncService.seek((e.target.value / 100) * ps.duration);
-                    }}
-                  />
-
-                  <div className="time-display">
-                    <span>{formatTime(isDragging ? (progress / 100) * ps.duration : syncService.getCurrentTime())}</span>
-                    <span>{formatTime(ps.duration)}</span>
-                  </div>
-
-                  <div className="player-controls">
-                    <button
-                      className={`btn-play ${ps.isPlaying ? 'pause' : ''}`}
-                      disabled={!s.isHost || !syncData.audioReady}
-                      onClick={() => syncService.togglePlay()}
-                    >
-                      <span>{ps.isPlaying ? '⏸' : '▶'}</span>
-                      <span>{ps.isPlaying ? 'Pause' : 'Play'}</span>
-                    </button>
-                  </div>
-
-                  <div className="volume-control">
-                    <span>🔊</span>
-                    <input
-                      type="range"
-                      className="vol-slider"
-                      min="0"
-                      max="100"
-                      defaultValue="80"
-                      onChange={(e) => syncService.setVolume(e.target.value)}
-                    />
-                  </div>
-
-                  {ps.isPlaying && (
-                    <div className="precision-indicator">
-                      <div className="precision-dot"></div>
-                      <span>🎯 Precision Mode Active</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="player-stats">
-                  <div className="sync-stats">
-                    <div className="stat">
-                      <div className="stat-label">Offset</div>
-                      <div className="stat-value">{cs.offset}</div>
-                      <div className="stat-unit">ms</div>
-                    </div>
-                    <div className="stat">
-                      <div className="stat-label">RTT</div>
-                      <div
-                        className={`stat-value ${cs.rtt < 30 ? 'good' : cs.rtt < 80 ? 'warning' : 'bad'}`}
-                      >
-                        {cs.rtt}
-                      </div>
-                      <div className="stat-unit">ms</div>
-                    </div>
-                    <div className="stat">
-                      <div className="stat-label">Drift</div>
-                      <div className="stat-value">{ds.current}</div>
-                      <div className="stat-unit">ms</div>
-                    </div>
-                    <div className="stat">
-                      <div className="stat-label">Adjustments</div>
-                      <div className="stat-value">{ds.corrections}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {!s.isHost && (
-          <div className="glass section">
-            {hostRequestPending ? (
-              <div className="host-request-pending">
-                <p>⏳ Host request sent. Waiting for approval...</p>
-              </div>
-            ) : (
-              <button className="btn-host" onClick={handleRequestHost}>
-                🎤 Request Host
-              </button>
-            )}
-          </div>
-        )}
-        {s.isHost && hostRequest && (
-          <div className="glass section host-request-section">
-            <p>
-              👑 <strong>{hostRequest.requesterName}</strong> wants to become host
-            </p>
-            <div className="host-request-actions">
-              <button className="btn-approve" onClick={handleApproveHostRequest}>
-                ✅ Approve
-              </button>
-              <button className="btn-deny" onClick={handleDenyHostRequest}>
-                ❌ Deny
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+      {notification && <div className={`fixed bottom-5 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-xl border px-4 py-3 font-mono text-xs shadow-2xl ${notification.type === 'error' ? 'border-[#EF4444]/40 bg-[#2B1015] text-[#FCA5A5]' : 'border-[#10B981]/40 bg-[#0D211C] text-[#A7F3D0]'}`} role="status">{notification.type === 'error' ? <XCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}{notification.message}</div>}
     </div>
   );
 }

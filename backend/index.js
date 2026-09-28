@@ -54,7 +54,27 @@ var rooms = new Map();
 var clientRTT = new Map();
 
 function generateRoomCode() {
-  return Math.random().toString(36).substring(2, 6).toUpperCase();
+  var code;
+  do {
+    code = Math.random().toString(36).substring(2, 6).toUpperCase();
+  } while (rooms.has(code));
+  return code;
+}
+
+function safeText(value, fallback, maxLength) {
+  if (typeof value !== 'string') return fallback;
+  var trimmed = value.trim().replace(/\s+/g, ' ');
+  return trimmed ? trimmed.slice(0, maxLength) : fallback;
+}
+
+function normalisePlacement(value) {
+  if (!value || !Number.isFinite(Number(value.x)) || !Number.isFinite(Number(value.y))) {
+    return null;
+  }
+  return {
+    x: Math.max(-0.9, Math.min(0.9, Number(value.x))),
+    y: Math.max(-0.9, Math.min(0.9, Number(value.y)))
+  };
 }
 
 function getRoomState(room) {
@@ -66,6 +86,7 @@ function getRoomState(room) {
   
   return {
     id: room.id,
+    name: room.name || 'SPATIAL ROOM',
     hostId: room.hostId,
     members: Array.from(room.members.values()),
     currentTrack: room.currentTrack,
@@ -109,10 +130,13 @@ io.on('connection', function(socket) {
   });
 
   socket.on('create-room', function(data, callback) {
-    var name = data.name;
+    data = data || {};
+    var name = safeText(data.name, 'Host', 32);
+    var roomName = safeText(data.roomName, name + "'s room", 48);
     var roomId = generateRoomCode();
     var room = {
       id: roomId,
+      name: roomName,
       hostId: socket.id,
       members: new Map(),
       currentTrack: null,
@@ -134,17 +158,18 @@ io.on('connection', function(socket) {
   });
 
   socket.on('join-room', function(data, callback) {
-    var roomId = data.roomId;
-    var name = data.name;
-    var room = rooms.get(roomId.toUpperCase());
+    data = data || {};
+    var roomId = String(data.roomId || '').trim().toUpperCase();
+    var name = safeText(data.name, 'Listener', 32);
+    var room = rooms.get(roomId);
     if (!room) {
       console.log('Room ' + roomId + ' not found');
       return callback({ success: false, error: 'Room not found' });
     }
 
     room.members.set(socket.id, { id: socket.id, name: name, isHost: false });
-    socket.join(roomId.toUpperCase());
-    currentRoom = roomId.toUpperCase();
+    socket.join(roomId);
+    currentRoom = roomId;
 
     var state = getRoomState(room);
     io.to(currentRoom).emit('room-updated', state);
@@ -277,10 +302,32 @@ io.on('connection', function(socket) {
     if (!currentRoom) return;
     var room = rooms.get(currentRoom);
     if (!room || room.hostId !== socket.id) return;
- 
-    room.placements = data.placements || {};
+
+    var nextPlacements = {};
+    var incomingPlacements = (data && data.placements) || {};
+    Object.keys(incomingPlacements).forEach(function(memberId) {
+      if (!room.members.has(memberId)) return;
+      var placement = normalisePlacement(incomingPlacements[memberId]);
+      if (placement) nextPlacements[memberId] = placement;
+    });
+    room.placements = nextPlacements;
     io.to(currentRoom).emit('room-updated', getRoomState(room));
     console.log('Updated placements in ' + currentRoom);
+  });
+
+  socket.on('update-my-placement', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    if (!room || !room.members.has(socket.id)) {
+      return callback({ success: false, error: 'Room not found' });
+    }
+
+    var placement = normalisePlacement(data && data.placement);
+    if (!placement) return callback({ success: false, error: 'Invalid speaker placement' });
+
+    room.placements[socket.id] = placement;
+    io.to(currentRoom).emit('room-updated', getRoomState(room));
+    callback({ success: true, placement: placement });
   });
 
   socket.on('update-audio-settings', function(data) {
@@ -328,7 +375,11 @@ io.on('connection', function(socket) {
     }
   });
 
-  socket.on('request-host-transfer', function(callback) {
+  socket.on('request-host-transfer', function(data, callback) {
+    // Older clients send only the acknowledgement callback; tolerate an
+    // optional payload as well so malformed requests cannot crash the server.
+    if (typeof data === 'function') callback = data;
+    if (typeof callback !== 'function') return;
     if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
     var room = rooms.get(currentRoom);
     if (!room) return callback({ success: false, error: 'Room not found' });
@@ -375,6 +426,19 @@ io.on('connection', function(socket) {
     console.log('New host in ' + currentRoom + ': ' + (newHost ? newHost.name : 'unknown'));
   });
 
+  socket.on('deny-host-transfer', function(data, callback) {
+    if (!currentRoom) return callback({ success: false, error: 'Not in a room' });
+    var room = rooms.get(currentRoom);
+    var requesterId = data && data.requesterId;
+    if (!room || room.hostId !== socket.id || !room.hostTransferRequests.has(requesterId)) {
+      return callback({ success: false, error: 'This request is no longer available' });
+    }
+
+    room.hostTransferRequests.delete(requesterId);
+    io.to(requesterId).emit('host-transfer-denied');
+    callback({ success: true });
+  });
+
   socket.on('disconnect', function() {
     console.log('Disconnected: ' + socket.id);
     clientRTT.delete(socket.id);
@@ -385,6 +449,7 @@ io.on('connection', function(socket) {
 
     var member = room.members.get(socket.id);
     room.members.delete(socket.id);
+    delete room.placements[socket.id];
     room.hostTransferRequests.delete(socket.id);
     if (room.readyMembers) {
       room.readyMembers.delete(socket.id);

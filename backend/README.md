@@ -1,14 +1,15 @@
-# 🎵 SyncPlay — Backend
+# AetherSync / SyncPlay backend
 
-Express + Socket.IO server that powers real-time, multi-device audio synchronization.
+Express + Socket.IO server for real-time, multi-device audio synchronization.
 
-## What it does
+## Responsibilities
 
-- Manages rooms (create / join via 4-letter code)
-- Stores uploaded audio files in `uploads/`
-- Broadcasts synchronized play / pause / seek events
-- Runs NTP-like clock sync and drift correction
-- Handles host transfer between devices
+- Creates and joins named rooms using four-character invite codes
+- Stores host-uploaded audio in `uploads/`
+- Schedules synchronized play, pause, and seek events
+- Responds to client clock-sync samples and relays drift-correction heartbeats
+- Broadcasts device placement and shared audio-effect/spatial-mode changes
+- Tracks audio-buffer readiness and supports approved host-control transfer
 
 ## Run
 
@@ -18,8 +19,8 @@ npm install
 npm start
 ```
 
-The server listens on `http://localhost:5000` (or `PORT`) and also serves
-the frontend from `../frontend/client`, so opening `http://localhost:5000`
-loads the app directly.
+The API listens on `http://localhost:5000` by default (or `PORT`). Start the
+React UI separately from `../frontend` with `npm run dev`; the Vite dev server
+proxies Socket.IO, upload, and uploaded-audio requests to this server.
 
-See the project root `README.md` for the full workspace layout.
+See the project root `README.md` for full setup instructions.
